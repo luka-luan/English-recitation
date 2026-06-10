@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>英语背诵工作台</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Recitation Studio</p>
+          <h1>英语背诵工作台</h1>
+        </div>
+        <div class="top-actions">
+          <button id="sampleBtn" class="ghost">载入示例</button>
+          <button id="jumpRecordBtn" class="primary">开始背诵</button>
+          <button id="resetBtn" class="ghost">清空</button>
+        </div>
+      </header>
+
+      <section class="workspace">
+        <aside class="control-panel" aria-label="导入和录制控制">
+          <div class="panel-section">
+            <h2>导入文章</h2>
+            <label class="file-drop" for="fileInput">
+              <span class="file-icon">PDF / TXT</span>
+              <strong>选择英文文章</strong>
+              <small>支持 PDF、TXT、MD、SRT、VTT；也可以直接粘贴。</small>
+              <input id="fileInput" type="file" accept=".pdf,.txt,.md,.srt,.vtt,text/plain,application/pdf,text/vtt" />
+            </label>
+            <div class="url-import">
+              <input id="sourceUrl" type="url" placeholder="粘贴文章网页或字幕链接" />
+              <button id="importUrlBtn">读取链接</button>
+            </div>
+            <textarea id="pasteBox" placeholder="在这里粘贴英文文章，或粘贴中英交替文本。"></textarea>
+            <div class="inline-actions">
+              <button id="parseBtn" class="primary">生成逐句稿</button>
+              <button id="translateBtn">尝试自动翻译</button>
+            </div>
+            <p id="importStatus" class="status" role="status"></p>
+          </div>
+
+          <div class="panel-section">
+            <h2>背诵模式</h2>
+            <div class="segmented" role="group" aria-label="隐藏选项">
+              <button data-hide-mode="none" class="active">全部显示</button>
+              <button data-hide-mode="hint2">前两词</button>
+              <button data-hide-mode="en">全部隐藏</button>
+            </div>
+            <div class="hint-row">
+              <button id="nextHintBtn">提示下 4 词</button>
+              <span id="nextHintText">根据实时识别位置提示。</span>
+            </div>
+            <label class="toggle-row">
+              <input id="compactToggle" type="checkbox" />
+              <span>紧凑显示</span>
+            </label>
+          </div>
+
+          <div class="panel-section record-section" id="recordSection">
+            <h2>摄像头与录音</h2>
+            <video id="cameraPreview" playsinline muted></video>
+            <div class="device-grid">
+              <label>
+                <span>摄像头</span>
+                <select id="cameraSelect"></select>
+              </label>
+              <label>
+                <span>麦克风</span>
+                <select id="micSelect"></select>
+              </label>
+            </div>
+            <div class="inline-actions">
+              <button id="refreshDevicesBtn">刷新设备</button>
+              <button id="cameraBtn">开启摄像头</button>
+              <button id="recordBtn" class="danger" disabled>开始背诵</button>
+            </div>
+            <p class="browser-hint">摄像头录制建议用 Chrome、Edge 或 Safari 打开：<strong>http://127.0.0.1:4173/</strong></p>
+            <div class="inline-actions">
+              <button id="stopBtn" disabled>结束并评分</button>
+              <a id="downloadLink" class="download-link" hidden>下载录像</a>
+            </div>
+            <textarea id="manualTranscript" class="manual-transcript" placeholder="语音识别不可用时，把你的背诵转写粘到这里评分。"></textarea>
+            <button id="scoreManualBtn">用文本评分</button>
+            <p id="recordStatus" class="status" role="status"></p>
+          </div>
+        </aside>
+
+        <section class="reader-panel" aria-label="文章和纠错结果">
+          <div class="reader-toolbar">
+            <div class="metric">
+              <span id="sentenceCount">0</span>
+              <small>句</small>
+            </div>
+            <div class="metric">
+              <span id="wordCount">0</span>
+              <small>词</small>
+            </div>
+          </div>
+
+          <div class="live-strip">
+            <span>实时转写</span>
+            <p id="liveTranscript">等待开始背诵。</p>
+          </div>
+
+          <div id="articleList" class="article-list empty">
+            <div class="empty-state">
+              <h2>导入一篇文章开始练习</h2>
+              <p>导入后，每一句英文都会按序号显示；如果原文含中文，会以普通文本显示在英文下方。背诵结束后会按单词标出正确、漏背和多背。</p>
+            </div>
+          </div>
+        </section>
+      </section>
+    </main>
+    <section id="floatingResult" class="floating-result" hidden>
+      <div>
+        <strong id="floatingRange">本次背诵结果</strong>
+        <span id="floatingMeta">完成后显示句段、句数和准确率。</span>
+        <small id="floatingTranscript">暂无转写。</small>
+      </div>
+      <button id="floatingJumpBtn">跳转</button>
+    </section>
+    <div id="replayDock" class="floating-replay-dock" hidden>
+      <video id="replayVideo" class="floating-replay" controls playsinline></video>
+      <button id="replayBackBtn" class="replay-back" type="button">后退 5 秒</button>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
