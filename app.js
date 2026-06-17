@@ -34,6 +34,7 @@ const DAILY_STATS_START_KEY = "english-reciter-daily-stats-start-v1";
 const ARTICLE_PROGRESS_KEY = "english-reciter-article-progress-v1";
 const CURRENT_ARTICLE_TEXT_KEY = "english-reciter-current-article-v1";
 const URL_HISTORY_KEY = "english-reciter-url-history-v1";
+const PRACTICE_BACKUP_KEY = "english-reciter-practice-backup-v1";
 let dailyStatsSaveTimer = 0;
 
 const els = {
@@ -541,6 +542,7 @@ function renderArticle() {
     translation.dataset.role = "translation";
     translation.textContent = sentence.zh || "";
     translation.hidden = !sentence.zh;
+    translation.classList.toggle("hidden-text", state.hideMode === "zh");
 
     body.append(english, translation);
     card.append(number, body);
@@ -566,17 +568,15 @@ function renderEnglishSentence(text, sentenceIndex) {
 
       surfaceWordOrder += 1;
       const wordState = state.comparison ? comparisonStateForWord(record.wordIndexes) : "";
+      const history = cumulativeWordInfo(record.wordIndexes);
       const classes = ["word"];
       const attrs = [`data-word-order="${surfaceWordOrder}"`];
-      if (wordState) classes.push(wordState);
-      else {
-        const history = cumulativeWordInfo(record.wordIndexes);
-        if (history) {
-          classes.push("word-history", history.className);
-          attrs.push(`style="--history-bg: ${history.background}"`);
-          attrs.push(`title="${escapeHtml(history.title)}"`);
-        }
+      if (history) {
+        classes.push("word-history", history.className);
+        attrs.push(`style="--history-bg: ${history.background}"`);
+        attrs.push(`title="${escapeHtml(history.title)}"`);
       }
+      if (wordState) classes.push(wordState);
       if (shouldHideToken(surfaceWordOrder, "word")) classes.push("hidden-text");
       return `<span class="${classes.join(" ")}" ${attrs.join(" ")}>${escapeHtml(record.value)}</span>`;
     })
@@ -1412,6 +1412,7 @@ function rememberUrl(url) {
 
 function saveUrlHistory() {
   localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(normalizeUrlHistory(state.urlHistory)));
+  savePracticeBackup();
   scheduleDailyStatsServerSave();
 }
 
@@ -1515,6 +1516,7 @@ function saveArticleProgress() {
   };
   state.articleProgress = limitArticleProgress(state.articleProgress);
   localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+  savePracticeBackup();
   scheduleDailyStatsServerSave();
 }
 
@@ -1529,6 +1531,10 @@ function practiceDataPayload() {
     urlHistory: normalizeUrlHistory(state.urlHistory),
     currentArticleText: localStorage.getItem(CURRENT_ARTICLE_TEXT_KEY) || "",
   };
+}
+
+function savePracticeBackup() {
+  localStorage.setItem(PRACTICE_BACKUP_KEY, JSON.stringify(practiceDataPayload()));
 }
 
 function exportPracticeData() {
@@ -1576,6 +1582,7 @@ function importPracticeData(payload) {
   localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
   localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
   localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(state.urlHistory));
+  savePracticeBackup();
 
   const currentArticleText = typeof payload.currentArticleText === "string" ? payload.currentArticleText.trim() : "";
   if (currentArticleText) {
@@ -1631,6 +1638,7 @@ function limitArticleProgress(progress) {
 
 function saveDailyStats() {
   localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
+  savePracticeBackup();
   scheduleDailyStatsServerSave();
 }
 
@@ -2045,6 +2053,7 @@ state.selectedDailyStatsDate = localDateKey();
 pruneDailyStats();
 localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
 localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
+savePracticeBackup();
 renderDailyStats();
 renderUrlHistory();
 const savedArticleText = localStorage.getItem(CURRENT_ARTICLE_TEXT_KEY);
@@ -2059,3 +2068,4 @@ importPracticeDataFromHash();
 loadDailyStatsFromServer();
 populateDeviceOptions();
 syncFloatingControls();
+window.addEventListener("pagehide", savePracticeBackup);
