@@ -220,6 +220,18 @@ h2 {
   border-bottom: 0;
 }
 
+.data-tools {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin: 8px 0 10px;
+}
+
+.data-tools button {
+  min-height: 32px;
+  font-size: 0.86rem;
+}
+
 .file-drop {
   min-height: 78px;
   border: 1px dashed rgba(60, 60, 67, 0.26);

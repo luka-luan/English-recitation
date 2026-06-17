@@ -47,6 +47,9 @@ const els = {
   wordCount: document.querySelector("#wordCount"),
   compactToggle: document.querySelector("#compactToggle"),
   dailyStatsList: document.querySelector("#dailyStatsList"),
+  exportDataBtn: document.querySelector("#exportDataBtn"),
+  importDataBtn: document.querySelector("#importDataBtn"),
+  dataImportInput: document.querySelector("#dataImportInput"),
   cameraPreview: document.querySelector("#cameraPreview"),
   cameraSelect: document.querySelector("#cameraSelect"),
   micSelect: document.querySelector("#micSelect"),
@@ -93,6 +96,9 @@ els.floatingCameraBtn.addEventListener("click", toggleFloatingCamera);
 els.floatingRecordBtn.addEventListener("click", startRecitation);
 els.floatingStopBtn.addEventListener("click", stopRecitation);
 els.dailyStatsList.addEventListener("click", handleDailyStatsClick);
+els.exportDataBtn.addEventListener("click", exportPracticeData);
+els.importDataBtn.addEventListener("click", () => els.dataImportInput.click());
+els.dataImportInput.addEventListener("change", handlePracticeDataImport);
 
 document.querySelectorAll("[data-hide-mode]").forEach((button) => {
   button.addEventListener("click", () => setHideMode(button.dataset.hideMode));
@@ -1430,6 +1436,79 @@ function saveArticleProgress() {
   state.articleProgress = limitArticleProgress(state.articleProgress);
   localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
   scheduleDailyStatsServerSave();
+}
+
+function practiceDataPayload() {
+  return {
+    app: "english-reciter",
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    dailyStats: normalizeDailyStats(state.dailyStats),
+    dailyStatsStartDate: isDateKey(state.dailyStatsStartDate) ? state.dailyStatsStartDate : localDateKey(),
+    articleProgress: normalizeArticleProgress(state.articleProgress),
+    currentArticleText: localStorage.getItem(CURRENT_ARTICLE_TEXT_KEY) || "",
+  };
+}
+
+function exportPracticeData() {
+  const payload = practiceDataPayload();
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `english-reciter-data-${localDateKey()}.json`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+  setImportStatus("已导出背诵数据。换网址或换浏览器时，可以用“导入数据”恢复。");
+}
+
+async function handlePracticeDataImport(event) {
+  const file = event.target.files?.[0];
+  event.target.value = "";
+  if (!file) return;
+
+  try {
+    const payload = JSON.parse(await file.text());
+    if (payload?.app !== "english-reciter") throw new Error("文件不是英语背诵数据。");
+    importPracticeData(payload);
+  } catch (error) {
+    setImportStatus(error.message || "导入失败，请确认选择的是之前导出的 JSON 文件。");
+  }
+}
+
+function importPracticeData(payload) {
+  const importedStats = normalizeDailyStats(payload.dailyStats);
+  const importedProgress = normalizeArticleProgress(payload.articleProgress);
+  state.dailyStats = mergeDailyStats(state.dailyStats, importedStats);
+  state.articleProgress = mergeArticleProgress(state.articleProgress, importedProgress);
+  state.dailyStatsStartDate = earliestDateKey([
+    state.dailyStatsStartDate,
+    isDateKey(payload.dailyStatsStartDate) ? payload.dailyStatsStartDate : "",
+    ...Object.keys(state.dailyStats),
+  ]) || localDateKey();
+
+  localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
+  localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
+  localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+
+  const currentArticleText = typeof payload.currentArticleText === "string" ? payload.currentArticleText.trim() : "";
+  if (currentArticleText) {
+    localStorage.setItem(CURRENT_ARTICLE_TEXT_KEY, currentArticleText);
+    if (!state.sentences.length) {
+      els.pasteBox.value = currentArticleText;
+      parseArticle(currentArticleText, { persist: false, status: false });
+    }
+  }
+
+  if (state.articleKey) {
+    applyStoredArticleProgress();
+    renderArticle();
+  }
+  renderDailyStats();
+  scheduleDailyStatsServerSave();
+  setImportStatus("已导入并合并背诵数据。");
 }
 
 function limitArticleProgress(progress) {

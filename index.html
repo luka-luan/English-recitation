@@ -51,6 +51,11 @@
           <div class="panel-section stats-section">
             <h2>每日统计</h2>
             <p class="section-note">结束评分后自动更新。</p>
+            <div class="data-tools" aria-label="背诵数据迁移">
+              <button id="exportDataBtn" type="button">导出数据</button>
+              <button id="importDataBtn" type="button">导入数据</button>
+              <input id="dataImportInput" type="file" accept="application/json,.json" hidden />
+            </div>
             <div id="dailyStatsList" class="daily-stats-list"></div>
           </div>
 
