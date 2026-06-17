@@ -50,6 +50,7 @@ select {
 button,
 .download-link,
 input[type="url"],
+input[type="email"],
 select,
 textarea {
   border: 1px solid var(--line);
@@ -67,6 +68,7 @@ textarea {
 }
 
 input[type="url"],
+input[type="email"],
 select {
   min-height: 34px;
   padding: 0 10px;
@@ -81,6 +83,7 @@ textarea {
 }
 
 input[type="url"]:focus,
+input[type="email"]:focus,
 select:focus,
 textarea:focus {
   background: #ffffff;
@@ -230,6 +233,42 @@ h2 {
 .data-tools button {
   min-height: 32px;
   font-size: 0.86rem;
+}
+
+.cloud-auth {
+  display: grid;
+  gap: 8px;
+}
+
+.cloud-auth[hidden] {
+  display: none;
+}
+
+.cloud-auth input {
+  width: 100%;
+}
+
+.cloud-auth span {
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#cloudSignedIn {
+  grid-template-columns: 1fr 1fr;
+  align-items: center;
+}
+
+#cloudSignedIn span {
+  grid-column: 1 / -1;
+}
+
+#cloudSignedIn button {
+  min-height: 32px;
+  font-size: 0.84rem;
 }
 
 .file-drop {

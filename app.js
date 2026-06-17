@@ -27,8 +27,16 @@ const state = {
   pendingStatsRange: null,
   currentSessionCounted: false,
   urlHistory: [],
+  cloudClient: null,
+  cloudSession: null,
+  cloudReady: false,
+  cloudSaving: false,
+  cloudApplying: false,
 };
 
+const SUPABASE_URL = "https://owwvxgqiarhqmepajorf.supabase.co";
+const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_q-HR6ZeIAZBzYPOvRkfmmw_TSjMw8ev";
+const SUPABASE_DATA_TABLE = "reciter_data";
 const DAILY_STATS_KEY = "english-reciter-daily-stats-v1";
 const DAILY_STATS_START_KEY = "english-reciter-daily-stats-start-v1";
 const ARTICLE_PROGRESS_KEY = "english-reciter-article-progress-v1";
@@ -36,6 +44,7 @@ const CURRENT_ARTICLE_TEXT_KEY = "english-reciter-current-article-v1";
 const URL_HISTORY_KEY = "english-reciter-url-history-v1";
 const PRACTICE_BACKUP_KEY = "english-reciter-practice-backup-v1";
 let dailyStatsSaveTimer = 0;
+let cloudSaveTimer = 0;
 
 const els = {
   fileInput: document.querySelector("#fileInput"),
@@ -79,6 +88,15 @@ const els = {
   floatingRecordBtn: document.querySelector("#floatingRecordBtn"),
   floatingStopBtn: document.querySelector("#floatingStopBtn"),
   floatingExportBtn: document.querySelector("#floatingExportBtn"),
+  cloudStatus: document.querySelector("#cloudStatus"),
+  cloudSignedOut: document.querySelector("#cloudSignedOut"),
+  cloudSignedIn: document.querySelector("#cloudSignedIn"),
+  cloudEmail: document.querySelector("#cloudEmail"),
+  cloudLoginBtn: document.querySelector("#cloudLoginBtn"),
+  cloudPullBtn: document.querySelector("#cloudPullBtn"),
+  cloudPushBtn: document.querySelector("#cloudPushBtn"),
+  cloudLogoutBtn: document.querySelector("#cloudLogoutBtn"),
+  cloudUserLabel: document.querySelector("#cloudUserLabel"),
 };
 
 els.fileInput.addEventListener("change", handleFileChange);
@@ -103,6 +121,13 @@ els.floatingCameraBtn.addEventListener("click", toggleFloatingCamera);
 els.floatingRecordBtn.addEventListener("click", startRecitation);
 els.floatingStopBtn.addEventListener("click", stopRecitation);
 els.floatingExportBtn.addEventListener("click", exportPracticeData);
+els.cloudLoginBtn.addEventListener("click", sendCloudLoginLink);
+els.cloudEmail.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") sendCloudLoginLink();
+});
+els.cloudPullBtn.addEventListener("click", pullCloudData);
+els.cloudPushBtn.addEventListener("click", () => pushCloudData(true));
+els.cloudLogoutBtn.addEventListener("click", signOutCloud);
 els.dailyStatsList.addEventListener("click", handleDailyStatsClick);
 els.exportDataBtn.addEventListener("click", exportPracticeData);
 els.importDataBtn.addEventListener("click", () => els.dataImportInput.click());
@@ -1537,6 +1562,7 @@ function practiceDataPayload() {
 
 function savePracticeBackup() {
   localStorage.setItem(PRACTICE_BACKUP_KEY, JSON.stringify(practiceDataPayload()));
+  scheduleCloudSave();
 }
 
 function exportPracticeData() {
@@ -1567,7 +1593,7 @@ async function handlePracticeDataImport(event) {
   }
 }
 
-function importPracticeData(payload) {
+function importPracticeData(payload, options = {}) {
   const importedStats = normalizeDailyStats(payload.dailyStats);
   const importedProgress = normalizeArticleProgress(payload.articleProgress);
   const importedUrls = normalizeUrlHistory(payload.urlHistory);
@@ -1602,7 +1628,7 @@ function importPracticeData(payload) {
   renderDailyStats();
   renderUrlHistory();
   scheduleDailyStatsServerSave();
-  setImportStatus("已导入并合并背诵数据。");
+  if (options.status !== false) setImportStatus(options.statusMessage || "已导入并合并背诵数据。");
 }
 
 function importPracticeDataFromHash() {
@@ -1630,6 +1656,190 @@ function decodeBase64Url(value) {
   const binary = window.atob(padded);
   const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
   return new TextDecoder().decode(bytes);
+}
+
+async function initCloudSync() {
+  setCloudStatus("正在连接 Supabase 云同步...");
+  updateCloudUi();
+
+  try {
+    const { createClient } = await import("https://esm.sh/@supabase/supabase-js@2");
+    state.cloudClient = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+      auth: {
+        autoRefreshToken: true,
+        detectSessionInUrl: true,
+        persistSession: true,
+      },
+    });
+    state.cloudReady = true;
+
+    const { data, error } = await state.cloudClient.auth.getSession();
+    if (error) throw error;
+    await applyCloudSession(data.session);
+
+    state.cloudClient.auth.onAuthStateChange(async (_event, session) => {
+      await applyCloudSession(session);
+    });
+  } catch (error) {
+    state.cloudReady = false;
+    setCloudStatus(`云同步暂不可用：${cloudErrorMessage(error)}`);
+    updateCloudUi();
+  }
+}
+
+async function applyCloudSession(session) {
+  state.cloudSession = session || null;
+  updateCloudUi();
+
+  if (!state.cloudSession) {
+    setCloudStatus("未登录云同步。本地数据仍会正常保存。");
+    return;
+  }
+
+  setCloudStatus("已登录，正在合并云端数据...");
+  await pullCloudData({ silentWhenEmpty: true });
+}
+
+async function sendCloudLoginLink() {
+  if (!state.cloudClient) {
+    setCloudStatus("云同步还没有准备好，请稍后再试。");
+    return;
+  }
+
+  const email = els.cloudEmail.value.trim();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    setCloudStatus("请先输入邮箱。");
+    return;
+  }
+
+  els.cloudLoginBtn.disabled = true;
+  setCloudStatus("正在发送登录链接...");
+  try {
+    const { error } = await state.cloudClient.auth.signInWithOtp({
+      email,
+      options: { emailRedirectTo: cloudRedirectUrl() },
+    });
+    if (error) throw error;
+    setCloudStatus("登录链接已发送，请去邮箱点击链接。");
+  } catch (error) {
+    setCloudStatus(`发送失败：${cloudErrorMessage(error)}`);
+  } finally {
+    els.cloudLoginBtn.disabled = false;
+  }
+}
+
+async function signOutCloud() {
+  if (!state.cloudClient) return;
+  await state.cloudClient.auth.signOut();
+  state.cloudSession = null;
+  updateCloudUi();
+  setCloudStatus("已退出云同步。本地数据仍保留在这个浏览器。");
+}
+
+async function pullCloudData(options = {}) {
+  if (!state.cloudClient || !state.cloudSession?.user) {
+    setCloudStatus("请先登录云同步。");
+    return;
+  }
+
+  const userId = state.cloudSession.user.id;
+  els.cloudPullBtn.disabled = true;
+  try {
+    const { data, error } = await state.cloudClient
+      .from(SUPABASE_DATA_TABLE)
+      .select("payload, updated_at")
+      .eq("user_id", userId)
+      .maybeSingle();
+    if (error) throw error;
+
+    if (data?.payload?.app === "english-reciter") {
+      state.cloudApplying = true;
+      importPracticeData(data.payload, {
+        status: false,
+        statusMessage: "已从云端合并背诵数据。",
+      });
+      state.cloudApplying = false;
+      setCloudStatus(`已合并云端数据，最后同步：${formatCloudTime(data.updated_at)}。`);
+    } else if (!options.silentWhenEmpty) {
+      setCloudStatus("云端还没有数据，当前浏览器数据可以上传。");
+    }
+
+    await pushCloudData(false);
+  } catch (error) {
+    state.cloudApplying = false;
+    setCloudStatus(`读取云端失败：${cloudErrorMessage(error)}`);
+  } finally {
+    els.cloudPullBtn.disabled = false;
+  }
+}
+
+async function pushCloudData(showStatus = false) {
+  if (!state.cloudClient || !state.cloudSession?.user || state.cloudSaving) return;
+
+  state.cloudSaving = true;
+  updateCloudUi();
+  if (showStatus) setCloudStatus("正在上传当前背诵数据...");
+
+  try {
+    const userId = state.cloudSession.user.id;
+    const { error } = await state.cloudClient
+      .from(SUPABASE_DATA_TABLE)
+      .upsert({
+        user_id: userId,
+        payload: practiceDataPayload(),
+        updated_at: new Date().toISOString(),
+      }, { onConflict: "user_id" });
+    if (error) throw error;
+    setCloudStatus(`已同步到云端：${formatCloudTime(new Date().toISOString())}。`);
+  } catch (error) {
+    setCloudStatus(`上传云端失败：${cloudErrorMessage(error)}`);
+  } finally {
+    state.cloudSaving = false;
+    updateCloudUi();
+  }
+}
+
+function scheduleCloudSave() {
+  if (!state.cloudReady || !state.cloudSession?.user || state.cloudApplying) return;
+  window.clearTimeout(cloudSaveTimer);
+  cloudSaveTimer = window.setTimeout(() => pushCloudData(false), 1200);
+}
+
+function updateCloudUi() {
+  const signedIn = Boolean(state.cloudSession?.user);
+  els.cloudSignedOut.hidden = signedIn;
+  els.cloudSignedIn.hidden = !signedIn;
+  els.cloudUserLabel.textContent = signedIn ? state.cloudSession.user.email || "已登录" : "";
+  els.cloudPushBtn.disabled = !signedIn || state.cloudSaving;
+  els.cloudPullBtn.disabled = !signedIn || state.cloudSaving;
+  els.cloudLogoutBtn.disabled = state.cloudSaving;
+}
+
+function setCloudStatus(message) {
+  els.cloudStatus.textContent = message;
+}
+
+function cloudRedirectUrl() {
+  return `${window.location.origin}${window.location.pathname}`;
+}
+
+function formatCloudTime(value) {
+  const date = value ? new Date(value) : new Date();
+  if (Number.isNaN(date.getTime())) return "刚刚";
+  return date.toLocaleString("zh-CN", {
+    month: "numeric",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function cloudErrorMessage(error) {
+  const message = error?.message || String(error || "未知错误");
+  if (/Failed to fetch|NetworkError|Load failed/i.test(message)) return "网络连接失败";
+  if (/relation .* does not exist|reciter_data/i.test(message)) return "还没有创建 reciter_data 数据表";
+  if (/permission|policy|row-level|RLS/i.test(message)) return "数据表权限策略还没有配置好";
+  return message;
 }
 
 function limitArticleProgress(progress) {
@@ -2068,6 +2278,7 @@ if (savedArticleText) {
 }
 importPracticeDataFromHash();
 loadDailyStatsFromServer();
+initCloudSync();
 populateDeviceOptions();
 syncFloatingControls();
 window.addEventListener("pagehide", savePracticeBackup);
