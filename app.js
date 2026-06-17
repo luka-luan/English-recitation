@@ -5,14 +5,34 @@ const state = {
   mediaRecorder: null,
   recordedChunks: [],
   recognition: null,
+  recognitionWatchdog: null,
+  recognitionRestarting: false,
+  recognitionRestartCount: 0,
+  lastRecognitionAt: 0,
   finalTranscript: "",
   interimTranscript: "",
   comparison: null,
   reciteCounts: [],
+  wordHistory: [],
+  articleKey: "",
+  articleProgress: {},
   importingUrl: false,
   recordingUrl: "",
   isRecording: false,
+  dailyStats: {},
+  dailyStatsExpanded: false,
+  dailyStatsStartDate: "",
+  selectedDailyStatsDate: "",
+  lastRecognizedRange: null,
+  pendingStatsRange: null,
+  currentSessionCounted: false,
 };
+
+const DAILY_STATS_KEY = "english-reciter-daily-stats-v1";
+const DAILY_STATS_START_KEY = "english-reciter-daily-stats-start-v1";
+const ARTICLE_PROGRESS_KEY = "english-reciter-article-progress-v1";
+const CURRENT_ARTICLE_TEXT_KEY = "english-reciter-current-article-v1";
+let dailyStatsSaveTimer = 0;
 
 const els = {
   fileInput: document.querySelector("#fileInput"),
@@ -21,24 +41,17 @@ const els = {
   pasteBox: document.querySelector("#pasteBox"),
   parseBtn: document.querySelector("#parseBtn"),
   translateBtn: document.querySelector("#translateBtn"),
-  sampleBtn: document.querySelector("#sampleBtn"),
-  jumpRecordBtn: document.querySelector("#jumpRecordBtn"),
-  resetBtn: document.querySelector("#resetBtn"),
   importStatus: document.querySelector("#importStatus"),
   articleList: document.querySelector("#articleList"),
   sentenceCount: document.querySelector("#sentenceCount"),
   wordCount: document.querySelector("#wordCount"),
   compactToggle: document.querySelector("#compactToggle"),
-  nextHintBtn: document.querySelector("#nextHintBtn"),
-  nextHintText: document.querySelector("#nextHintText"),
+  dailyStatsList: document.querySelector("#dailyStatsList"),
   cameraPreview: document.querySelector("#cameraPreview"),
   cameraSelect: document.querySelector("#cameraSelect"),
   micSelect: document.querySelector("#micSelect"),
   refreshDevicesBtn: document.querySelector("#refreshDevicesBtn"),
   recordSection: document.querySelector("#recordSection"),
-  cameraBtn: document.querySelector("#cameraBtn"),
-  recordBtn: document.querySelector("#recordBtn"),
-  stopBtn: document.querySelector("#stopBtn"),
   recordStatus: document.querySelector("#recordStatus"),
   downloadLink: document.querySelector("#downloadLink"),
   manualTranscript: document.querySelector("#manualTranscript"),
@@ -52,15 +65,12 @@ const els = {
   floatingMeta: document.querySelector("#floatingMeta"),
   floatingTranscript: document.querySelector("#floatingTranscript"),
   floatingJumpBtn: document.querySelector("#floatingJumpBtn"),
+  floatingHintBtn: document.querySelector("#floatingHintBtn"),
+  floatingHintText: document.querySelector("#floatingHintText"),
+  floatingCameraBtn: document.querySelector("#floatingCameraBtn"),
+  floatingRecordBtn: document.querySelector("#floatingRecordBtn"),
+  floatingStopBtn: document.querySelector("#floatingStopBtn"),
 };
-
-const sampleText = `The first step toward confidence is not speaking perfectly. It is being willing to speak before everything feels ready.
-
-When we memorize a passage, we are training more than memory. We are training attention, rhythm, and courage.
-
-A sentence becomes easier to remember when we understand its shape. We notice where it rises, where it turns, and where it lands.
-
-If we make a mistake, we do not need to panic. We can pause, breathe, and return to the next clear word.`;
 
 els.fileInput.addEventListener("change", handleFileChange);
 els.importUrlBtn.addEventListener("click", handleUrlImport);
@@ -69,36 +79,60 @@ els.sourceUrl.addEventListener("keydown", (event) => {
 });
 els.parseBtn.addEventListener("click", () => parseArticle(els.pasteBox.value));
 els.translateBtn.addEventListener("click", translateMissingLines);
-els.sampleBtn.addEventListener("click", () => {
-  els.pasteBox.value = sampleText;
-  parseArticle(sampleText);
-});
-els.jumpRecordBtn.addEventListener("click", () => {
-  els.recordSection.scrollIntoView({ behavior: "smooth", block: "start" });
-  els.cameraBtn.focus({ preventScroll: true });
-});
-els.resetBtn.addEventListener("click", resetAll);
 els.compactToggle.addEventListener("change", () => {
   els.articleList.classList.toggle("compact", els.compactToggle.checked);
 });
-els.cameraBtn.addEventListener("click", startCamera);
 els.refreshDevicesBtn.addEventListener("click", populateDeviceOptions);
-els.recordBtn.addEventListener("click", startRecitation);
-els.stopBtn.addEventListener("click", stopRecitation);
 els.scoreManualBtn.addEventListener("click", scoreManualTranscript);
-els.nextHintBtn.addEventListener("click", showNextWordHint);
 els.cameraPreview.addEventListener("pointerdown", startCameraDrag);
 els.replayVideo.addEventListener("pointerdown", startReplayDrag);
 els.replayBackBtn.addEventListener("click", skipReplayBack);
 els.floatingJumpBtn.addEventListener("click", jumpToRecognizedRange);
+els.floatingHintBtn.addEventListener("click", showNextWordHint);
+els.floatingCameraBtn.addEventListener("click", toggleFloatingCamera);
+els.floatingRecordBtn.addEventListener("click", startRecitation);
+els.floatingStopBtn.addEventListener("click", stopRecitation);
+els.dailyStatsList.addEventListener("click", handleDailyStatsClick);
 
 document.querySelectorAll("[data-hide-mode]").forEach((button) => {
-  button.addEventListener("click", () => {
-    state.hideMode = button.dataset.hideMode;
-    document.querySelectorAll("[data-hide-mode]").forEach((item) => item.classList.toggle("active", item === button));
-    renderArticle();
-  });
+  button.addEventListener("click", () => setHideMode(button.dataset.hideMode));
 });
+
+document.querySelectorAll("[data-floating-hide-mode]").forEach((button) => {
+  button.addEventListener("click", () => setHideMode(button.dataset.floatingHideMode));
+});
+
+function setHideMode(mode) {
+  state.hideMode = mode;
+  document.querySelectorAll("[data-hide-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.hideMode === mode);
+  });
+  document.querySelectorAll("[data-floating-hide-mode]").forEach((button) => {
+    button.classList.toggle("active", button.dataset.floatingHideMode === mode);
+  });
+  renderArticle();
+  syncFloatingControls();
+}
+
+function toggleFloatingCamera() {
+  if (state.mediaStream) closeCamera();
+  else startCamera();
+}
+
+function syncFloatingControls() {
+  const hasArticle = Boolean(state.sentences.length);
+  const hasCamera = Boolean(state.mediaStream);
+  els.floatingCameraBtn.textContent = hasCamera ? "关摄像头" : "开摄像头";
+  els.floatingCameraBtn.disabled = state.isRecording;
+  els.floatingRecordBtn.disabled = !hasArticle || !hasCamera || state.isRecording;
+  els.floatingStopBtn.disabled = !state.isRecording;
+  els.floatingHintBtn.disabled = !hasArticle;
+}
+
+function setNextHintText(message) {
+  els.floatingHintText.textContent = message;
+  els.floatingHintText.title = message;
+}
 
 async function handleFileChange(event) {
   const file = event.target.files?.[0];
@@ -147,6 +181,11 @@ async function handleUrlImport() {
 }
 
 async function importVideoSubtitles(url, message = "正在用本地 yt-dlp 提取视频字幕...") {
+  if (isStaticPublicHost()) {
+    setImportStatus("当前公开静态版本没有后端字幕服务。请导入 .srt/.vtt 字幕文件，或把字幕文本粘贴进来。若要自动提取视频字幕，需要部署 Render 完整版。");
+    return false;
+  }
+
   setUrlLoading(true);
   setImportStatus(message);
   const controller = new AbortController();
@@ -162,7 +201,8 @@ async function importVideoSubtitles(url, message = "正在用本地 yt-dlp 提�
       body: JSON.stringify({ url }),
       signal: controller.signal,
     });
-    const data = await response.json();
+    const data = await response.json().catch(() => null);
+    if (!data) throw new Error("当前网址没有可用的后端字幕服务。");
     if (!response.ok || !data.ok) throw new Error(data.message || "字幕提取失败。");
     els.pasteBox.value = data.text.trim();
     parseArticle(data.text);
@@ -239,7 +279,9 @@ async function getPdfJs() {
   }
 }
 
-function parseArticle(rawText) {
+function parseArticle(rawText, options = {}) {
+  const shouldPersist = options.persist !== false;
+  const shouldReport = options.status !== false;
   const cleanedText = cleanImportedText(rawText);
   const text = normalizeWhitespace(cleanedText);
   if (!text) {
@@ -248,15 +290,20 @@ function parseArticle(rawText) {
   }
 
   state.sentences = buildSmartSentencePairs(cleanedText);
-  state.reciteCounts = Array(state.sentences.length).fill(0);
+  state.articleKey = articleKeyForSentences(state.sentences);
+  applyStoredArticleProgress();
   state.comparison = null;
   state.finalTranscript = "";
   state.interimTranscript = "";
+  state.lastRecognizedRange = null;
+  state.pendingStatsRange = null;
+  state.currentSessionCounted = false;
   els.liveTranscript.textContent = "等待开始背诵。";
   els.floatingResult.hidden = true;
+  if (shouldPersist) localStorage.setItem(CURRENT_ARTICLE_TEXT_KEY, cleanedText);
   renderArticle();
-  els.recordBtn.disabled = !state.mediaStream;
-  setImportStatus(`已生成 ${state.sentences.length} 句。已自动识别英文和中文。`);
+  syncFloatingControls();
+  if (shouldReport) setImportStatus(`已生成 ${state.sentences.length} 句。已自动识别英文和中文。`);
 }
 
 function buildSmartSentencePairs(rawText) {
@@ -437,6 +484,7 @@ function renderArticle() {
       </div>
     `;
     updateMetrics();
+    syncFloatingControls();
     return;
   }
 
@@ -480,6 +528,7 @@ function renderArticle() {
 
   updateMetrics();
   applyHideMode();
+  syncFloatingControls();
 }
 
 function renderEnglishSentence(text, sentenceIndex) {
@@ -497,9 +546,18 @@ function renderEnglishSentence(text, sentenceIndex) {
       surfaceWordOrder += 1;
       const wordState = state.comparison ? comparisonStateForWord(record.wordIndexes) : "";
       const classes = ["word"];
+      const attrs = [`data-word-order="${surfaceWordOrder}"`];
       if (wordState) classes.push(wordState);
+      else {
+        const history = cumulativeWordInfo(record.wordIndexes);
+        if (history) {
+          classes.push("word-history", history.className);
+          attrs.push(`style="--history-bg: ${history.background}"`);
+          attrs.push(`title="${escapeHtml(history.title)}"`);
+        }
+      }
       if (shouldHideToken(surfaceWordOrder, "word")) classes.push("hidden-text");
-      return `<span class="${classes.join(" ")}" data-word-order="${surfaceWordOrder}">${escapeHtml(record.value)}</span>`;
+      return `<span class="${classes.join(" ")}" ${attrs.join(" ")}>${escapeHtml(record.value)}</span>`;
     })
     .join("");
 }
@@ -517,6 +575,29 @@ function comparisonStateForWord(wordIndexes) {
   if (wordIndexes.every((wordIndex) => state.comparison.correctExpectedIndexes.has(wordIndex))) return "correct";
   if (wordIndexes.some((wordIndex) => state.comparison.missedExpectedIndexes?.has(wordIndex))) return "missed";
   return "";
+}
+
+function cumulativeWordInfo(wordIndexes) {
+  const totals = wordIndexes.reduce((sum, wordIndex) => {
+    const item = state.wordHistory[wordIndex] || {};
+    return {
+      correct: sum.correct + safeStatCount(item.correct),
+      missed: sum.missed + safeStatCount(item.missed),
+    };
+  }, { correct: 0, missed: 0 });
+  const total = totals.correct + totals.missed;
+  if (!total) return null;
+
+  const isMostlyMissed = totals.missed > totals.correct;
+  const maxSide = Math.max(totals.correct, totals.missed);
+  const confidence = Math.abs(totals.correct - totals.missed) / total;
+  const alpha = Math.min(0.48, 0.12 + Math.log1p(maxSide) * 0.08 + confidence * 0.12);
+  const color = isMostlyMissed ? "255, 59, 48" : "52, 199, 89";
+  return {
+    className: isMostlyMissed ? "history-missed" : "history-correct",
+    background: `rgba(${color}, ${alpha.toFixed(2)})`,
+    title: `累计：对 ${totals.correct} 次，错 ${totals.missed} 次`,
+  };
 }
 
 function tokenizeExpectedSentence(text, sentenceIndex) {
@@ -612,11 +693,11 @@ async function startCamera() {
     document.body.classList.add("camera-active");
     await els.cameraPreview.play();
     await populateDeviceOptions();
-    els.recordBtn.disabled = !state.sentences.length;
-    els.cameraBtn.textContent = "摄像头已开启";
+    syncFloatingControls();
     setRecordStatus(`摄像头和麦克风已就绪。当前麦克风：${activeAudioLabel()}。`);
   } catch (error) {
     document.body.classList.remove("camera-active");
+    syncFloatingControls();
     if (error.name === "NotAllowedError") {
       setRecordStatus("权限被系统或浏览器拒绝：请在 macOS 隐私设置里允许当前浏览器使用摄像头和麦克风，然后刷新本页重试。");
     } else if (error.name === "NotFoundError") {
@@ -627,6 +708,17 @@ async function startCamera() {
       setRecordStatus(`无法开启摄像头或麦克风：${error.name || "未知错误"}。建议用 Chrome、Edge 或 Safari 打开本页重试。`);
     }
   }
+}
+
+function closeCamera() {
+  if (state.isRecording || state.mediaRecorder?.state === "recording") {
+    stopRecitation();
+    return;
+  }
+
+  stopMediaStream();
+  syncFloatingControls();
+  setRecordStatus("摄像头和麦克风已关闭。");
 }
 
 function hasCameraApi() {
@@ -699,12 +791,18 @@ function startRecitation() {
   state.finalTranscript = "";
   state.interimTranscript = "";
   state.comparison = null;
+  state.lastRecognizedRange = null;
+  state.pendingStatsRange = null;
+  state.currentSessionCounted = false;
+  state.recognitionRestarting = false;
+  state.recognitionRestartCount = 0;
+  state.lastRecognitionAt = Date.now();
   state.isRecording = true;
   renderArticle();
   els.downloadLink.hidden = true;
   els.floatingResult.hidden = true;
   els.replayDock.hidden = true;
-  els.nextHintText.textContent = "开始背后，可点击提示下 4 词。";
+  setNextHintText("开始背后，可点击提示。");
 
   const mimeType = getSupportedMimeType();
   state.mediaRecorder = new MediaRecorder(state.mediaStream, mimeType ? { mimeType } : undefined);
@@ -715,18 +813,19 @@ function startRecitation() {
   state.mediaRecorder.start();
 
   startSpeechRecognition();
-  els.recordBtn.disabled = true;
-  els.stopBtn.disabled = false;
-  setRecordStatus("正在录制和识别。背完后点“结束并评分”。");
+  startRecognitionWatchdog();
+  syncFloatingControls();
+  setRecordStatus("正在录制和识别。若浏览器暂停转写，会自动恢复。");
 }
 
 function stopRecitation() {
+  state.pendingStatsRange = state.comparison?.activeRange || state.lastRecognizedRange || null;
   state.isRecording = false;
+  stopRecognitionWatchdog();
   if (state.mediaRecorder?.state === "recording") state.mediaRecorder.stop();
-  if (state.recognition) state.recognition.stop();
+  stopSpeechRecognition();
   stopMediaStream();
-  els.recordBtn.disabled = true;
-  els.stopBtn.disabled = true;
+  syncFloatingControls();
   setRecordStatus("正在整理最后的语音识别结果...");
   window.setTimeout(() => compareTranscript(), 600);
 }
@@ -739,8 +838,7 @@ function stopMediaStream() {
   els.cameraPreview.pause();
   els.cameraPreview.srcObject = null;
   document.body.classList.remove("camera-active");
-  els.cameraBtn.textContent = "开启摄像头";
-  els.recordBtn.disabled = true;
+  syncFloatingControls();
 }
 
 function startCameraDrag(event) {
@@ -807,16 +905,23 @@ function skipReplayBack() {
 function startSpeechRecognition() {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
+    stopRecognitionWatchdog();
     setRecordStatus("当前浏览器不支持语音识别。录像仍会保存，但无法自动评分。建议用 Chrome。");
     return;
   }
 
+  stopSpeechRecognition();
   const recognition = new Recognition();
   recognition.lang = "en-US";
   recognition.continuous = true;
   recognition.interimResults = true;
 
+  const markRecognitionActive = () => {
+    state.lastRecognitionAt = Date.now();
+  };
+
   recognition.addEventListener("result", (event) => {
+    markRecognitionActive();
     let finalText = "";
     let interimText = "";
 
@@ -832,22 +937,79 @@ function startSpeechRecognition() {
     compareTranscript(false);
   });
 
+  recognition.addEventListener("speechstart", markRecognitionActive);
+  recognition.addEventListener("soundstart", markRecognitionActive);
+  recognition.addEventListener("audiostart", markRecognitionActive);
+
   recognition.addEventListener("end", () => {
     if (state.isRecording && state.mediaRecorder?.state === "recording") {
-      try {
-        recognition.start();
-      } catch {
-        // Some browsers briefly reject restart while the previous recognition session closes.
-      }
+      restartSpeechRecognition("语音识别刚刚自动停了一下，正在恢复");
     }
   });
 
   recognition.addEventListener("error", (event) => {
+    markRecognitionActive();
+    if (event.error === "not-allowed" || event.error === "service-not-allowed") {
+      stopRecognitionWatchdog();
+      setRecordStatus("语音识别权限被拒绝。录像仍会保存，但无法自动评分。请检查浏览器麦克风权限。");
+      return;
+    }
     setRecordStatus(`语音识别暂停：${event.error}。录像仍在继续。`);
   });
 
   state.recognition = recognition;
-  recognition.start();
+  try {
+    recognition.start();
+    state.lastRecognitionAt = Date.now();
+    state.recognitionRestarting = false;
+  } catch {
+    state.recognitionRestarting = false;
+    restartSpeechRecognition("语音识别启动失败，正在重试");
+  }
+}
+
+function stopSpeechRecognition() {
+  if (!state.recognition) return;
+  try {
+    state.recognition.stop();
+  } catch {
+    // Browser speech recognition can throw if it has already stopped.
+  }
+  state.recognition = null;
+}
+
+function startRecognitionWatchdog() {
+  stopRecognitionWatchdog();
+  state.recognitionWatchdog = window.setInterval(() => {
+    if (!state.isRecording || state.mediaRecorder?.state !== "recording") return;
+    const staleFor = Date.now() - (state.lastRecognitionAt || 0);
+    if (staleFor > 12000) {
+      restartSpeechRecognition("实时转写刚刚停住了，正在自动恢复");
+    }
+  }, 4000);
+}
+
+function stopRecognitionWatchdog() {
+  if (!state.recognitionWatchdog) return;
+  window.clearInterval(state.recognitionWatchdog);
+  state.recognitionWatchdog = null;
+}
+
+function restartSpeechRecognition(message) {
+  if (!state.isRecording || state.mediaRecorder?.state !== "recording" || state.recognitionRestarting) return;
+  state.recognitionRestarting = true;
+  state.recognitionRestartCount += 1;
+  state.lastRecognitionAt = Date.now();
+  stopSpeechRecognition();
+  setRecordStatus(`${message}（第 ${state.recognitionRestartCount} 次）。`);
+
+  window.setTimeout(() => {
+    if (!state.isRecording || state.mediaRecorder?.state !== "recording") {
+      state.recognitionRestarting = false;
+      return;
+    }
+    startSpeechRecognition();
+  }, 450);
 }
 
 function updateLiveTranscript() {
@@ -864,8 +1026,23 @@ function compareTranscript(showResult = true) {
   if (!expectedWords.length) return;
   if (!spokenWords.length) {
     if (showResult) {
+      const fallbackRange = state.pendingStatsRange || state.comparison?.activeRange || state.lastRecognizedRange;
+      if (fallbackRange) {
+        if (state.comparison) updateWordHistory(state.comparison);
+        incrementReciteCounts(fallbackRange);
+        const stats = recordDailyWork(fallbackRange);
+        renderArticle();
+        updateMetrics();
+        renderResult();
+        const rangeLabel = sentenceRangeLabel(fallbackRange);
+        const statsText = dailyStatsStatusText(stats);
+        setRecordStatus(`评分完成：使用最近一次实时识别结果。${rangeLabel}${statsText}`);
+        return;
+      }
+
+      const stats = recordDailyWork(null);
       renderResult();
-      setRecordStatus("还没有识别到可评分的英文。可以回看录像，或把转写粘到手动评分框。");
+      setRecordStatus(`还没有识别到可评分的英文。${dailyStatsStatusText(stats)}可以回看录像，或把转写粘到手动评分框。`);
     }
     return;
   }
@@ -881,19 +1058,24 @@ function compareTranscript(showResult = true) {
   const extras = spokenWords.filter((_, index) => !matchedSpokenIndexes.has(index));
   const activeWordCount = Math.max(1, activeRange.end - activeRange.start);
   const accuracy = Math.round((correctExpectedIndexes.size / activeWordCount) * 100);
+  state.lastRecognizedRange = activeRange;
+  state.comparison = { correctExpectedIndexes, missedExpectedIndexes, extras, accuracy, activeRange };
 
+  let stats = null;
   if (showResult) {
+    updateWordHistory(state.comparison);
     incrementReciteCounts(activeRange);
+    stats = recordDailyWork(activeRange);
   }
 
-  state.comparison = { correctExpectedIndexes, missedExpectedIndexes, extras, accuracy, activeRange };
   renderArticle();
   updateMetrics();
 
   if (showResult) {
     renderResult();
     const rangeLabel = sentenceRangeLabel(activeRange);
-    setRecordStatus(`评分完成：${accuracy}% 准确率。${rangeLabel}绿色是背对的词，红色是这一段里漏掉或顺序不对的词。`);
+    const statsText = dailyStatsStatusText(stats);
+    setRecordStatus(`评分完成：${accuracy}% 准确率。${rangeLabel}${statsText}绿色是背对的词，红色是这一段里漏掉或顺序不对的词。`);
   }
 }
 
@@ -905,6 +1087,8 @@ function scoreManualTranscript() {
 
   state.finalTranscript = els.manualTranscript.value.trim();
   state.interimTranscript = "";
+  state.currentSessionCounted = false;
+  state.pendingStatsRange = null;
   updateLiveTranscript();
   compareTranscript();
 }
@@ -1049,6 +1233,27 @@ function incrementReciteCounts(activeRange) {
     const index = sentence - 1;
     state.reciteCounts[index] = (state.reciteCounts[index] || 0) + 1;
   }
+  saveArticleProgress();
+}
+
+function updateWordHistory(comparison) {
+  const range = comparison?.activeRange;
+  if (!range) return;
+  ensureWordHistoryLength();
+
+  for (let index = range.start; index < range.end; index += 1) {
+    const item = state.wordHistory[index] || { correct: 0, missed: 0 };
+    if (comparison.correctExpectedIndexes?.has(index)) item.correct = safeStatCount(item.correct) + 1;
+    else item.missed = safeStatCount(item.missed) + 1;
+    state.wordHistory[index] = item;
+  }
+
+  saveArticleProgress();
+}
+
+function ensureWordHistoryLength() {
+  const expectedLength = expectedWordCount();
+  state.wordHistory = normalizeWordHistory(state.wordHistory, expectedLength);
 }
 
 function activeSentenceRange(activeRange) {
@@ -1058,6 +1263,424 @@ function activeSentenceRange(activeRange) {
     start: ranges[0].sentenceIndex + 1,
     end: ranges[ranges.length - 1].sentenceIndex + 1,
   };
+}
+
+function recordDailyWork(activeRange) {
+  if (state.currentSessionCounted) {
+    return { sentences: 0, sessions: 0, counted: false };
+  }
+
+  const sentenceRange = activeRange ? activeSentenceRange(activeRange) : null;
+  const sentenceCount = sentenceRange ? sentenceRange.end - sentenceRange.start + 1 : 0;
+  const wordCount = activeRange ? Math.max(0, activeRange.end - activeRange.start) : 0;
+  const today = localDateKey();
+  const current = state.dailyStats[today] || { sentences: 0, sessions: 0, words: 0 };
+  state.dailyStats[today] = {
+    sentences: current.sentences + sentenceCount,
+    sessions: current.sessions + 1,
+    words: (current.words || 0) + wordCount,
+  };
+  state.currentSessionCounted = true;
+  pruneDailyStats();
+  saveDailyStats();
+  renderDailyStats();
+  return { sentences: sentenceCount, sessions: 1, words: wordCount, counted: true };
+}
+
+function dailyStatsStatusText(stats) {
+  if (!stats?.counted) return "";
+  return `今日统计已更新：本次 +${stats.sentences} 句，+1 次。`;
+}
+
+function localDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function isDateKey(value) {
+  return typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function dateFromKey(key) {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function addDays(date, offset) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + offset);
+  return next;
+}
+
+function datesBetween(startKey, endKey) {
+  const dates = [];
+  let cursor = dateFromKey(startKey);
+  const end = dateFromKey(endKey);
+  if (cursor > end) cursor = end;
+
+  while (cursor <= end) {
+    dates.push(localDateKey(cursor));
+    cursor = addDays(cursor, 1);
+  }
+
+  return dates;
+}
+
+function loadDailyStats() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(DAILY_STATS_KEY) || "{}");
+    return normalizeDailyStats(parsed);
+  } catch {
+    return {};
+  }
+}
+
+function normalizeDailyStats(source) {
+  if (!source || typeof source !== "object") return {};
+  return Object.fromEntries(Object.entries(source)
+    .filter(([date, value]) => isDateKey(date) && value && typeof value === "object")
+    .map(([date, value]) => [date, {
+      sentences: safeStatCount(value.sentences),
+      sessions: safeStatCount(value.sessions),
+      words: safeStatCount(value.words),
+    }]));
+}
+
+function safeStatCount(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
+}
+
+function loadArticleProgress() {
+  try {
+    return normalizeArticleProgress(JSON.parse(localStorage.getItem(ARTICLE_PROGRESS_KEY) || "{}"));
+  } catch {
+    return {};
+  }
+}
+
+function normalizeArticleProgress(source) {
+  if (!source || typeof source !== "object") return {};
+  return Object.fromEntries(Object.entries(source)
+    .filter(([key, value]) => isArticleKey(key) && value && typeof value === "object")
+    .map(([key, value]) => [key, {
+      reciteCounts: normalizeCountArray(value.reciteCounts),
+      wordHistory: normalizeWordHistory(value.wordHistory),
+      updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
+    }]));
+}
+
+function normalizeCountArray(source, length = 0) {
+  const sourceArray = Array.isArray(source) ? source : [];
+  const targetLength = length || sourceArray.length;
+  return Array.from({ length: targetLength }, (_, index) => safeStatCount(sourceArray[index]));
+}
+
+function normalizeWordHistory(source, length = 0) {
+  const sourceArray = Array.isArray(source) ? source : [];
+  const targetLength = length || sourceArray.length;
+  return Array.from({ length: targetLength }, (_, index) => ({
+    correct: safeStatCount(sourceArray[index]?.correct),
+    missed: safeStatCount(sourceArray[index]?.missed),
+  }));
+}
+
+function isArticleKey(value) {
+  return typeof value === "string" && /^article-[a-z0-9]{6,16}$/.test(value);
+}
+
+function articleKeyForSentences(sentences) {
+  const source = sentences
+    .map((sentence) => sentence.english)
+    .join("\n")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+  return `article-${hashString(source)}`;
+}
+
+function hashString(text) {
+  let hash = 2166136261;
+  for (let index = 0; index < text.length; index += 1) {
+    hash ^= text.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+function expectedWordCount() {
+  return state.sentences.reduce((sum, sentence) => sum + wordsFromText(sentence.english).length, 0);
+}
+
+function applyStoredArticleProgress() {
+  const progress = state.articleProgress[state.articleKey] || {};
+  state.reciteCounts = normalizeCountArray(progress.reciteCounts, state.sentences.length);
+  state.wordHistory = normalizeWordHistory(progress.wordHistory, expectedWordCount());
+}
+
+function saveArticleProgress() {
+  if (!state.articleKey) return;
+  state.articleProgress[state.articleKey] = {
+    reciteCounts: normalizeCountArray(state.reciteCounts, state.sentences.length),
+    wordHistory: normalizeWordHistory(state.wordHistory, expectedWordCount()),
+    updatedAt: new Date().toISOString(),
+  };
+  state.articleProgress = limitArticleProgress(state.articleProgress);
+  localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+  scheduleDailyStatsServerSave();
+}
+
+function limitArticleProgress(progress) {
+  return Object.fromEntries(Object.entries(normalizeArticleProgress(progress))
+    .sort((left, right) => String(right[1].updatedAt).localeCompare(String(left[1].updatedAt)))
+    .slice(0, 20));
+}
+
+function saveDailyStats() {
+  localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
+  scheduleDailyStatsServerSave();
+}
+
+function loadDailyStatsStartDate() {
+  const stored = localStorage.getItem(DAILY_STATS_START_KEY);
+  if (isDateKey(stored)) return stored;
+  const firstRecordedDate = Object.keys(state.dailyStats).filter(isDateKey).sort()[0];
+  return firstRecordedDate || localDateKey();
+}
+
+function saveDailyStatsStartDate() {
+  if (!isDateKey(state.dailyStatsStartDate)) state.dailyStatsStartDate = localDateKey();
+  localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
+  scheduleDailyStatsServerSave();
+}
+
+function canSyncDailyStatsToServer() {
+  return (window.location.protocol === "http:" || window.location.protocol === "https:") && !isStaticPublicHost();
+}
+
+function isStaticPublicHost() {
+  return /(?:^|\.)(github\.io|pages\.dev|netlify\.app|vercel\.app)$/i.test(window.location.hostname);
+}
+
+function scheduleDailyStatsServerSave() {
+  if (!canSyncDailyStatsToServer()) return;
+  window.clearTimeout(dailyStatsSaveTimer);
+  dailyStatsSaveTimer = window.setTimeout(saveDailyStatsToServer, 250);
+}
+
+async function saveDailyStatsToServer() {
+  if (!canSyncDailyStatsToServer()) return;
+  try {
+    await fetch("/api/state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        dailyStats: state.dailyStats,
+        dailyStatsStartDate: state.dailyStatsStartDate,
+        articleProgress: state.articleProgress,
+      }),
+    });
+  } catch {
+    // LocalStorage already has a copy; the next successful page load can sync it again.
+  }
+}
+
+async function loadDailyStatsFromServer() {
+  if (!canSyncDailyStatsToServer()) return;
+  try {
+    const response = await fetch("/api/state");
+    if (!response.ok) return;
+    const data = await response.json();
+    const serverStats = normalizeDailyStats(data.dailyStats);
+    state.dailyStats = mergeDailyStats(state.dailyStats, serverStats);
+    state.articleProgress = mergeArticleProgress(state.articleProgress, normalizeArticleProgress(data.articleProgress));
+    state.dailyStatsStartDate = earliestDateKey([
+      state.dailyStatsStartDate,
+      isDateKey(data.dailyStatsStartDate) ? data.dailyStatsStartDate : "",
+      ...Object.keys(state.dailyStats),
+    ]) || localDateKey();
+    pruneDailyStats();
+    localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
+    localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
+    localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+    if (state.articleKey) {
+      applyStoredArticleProgress();
+      renderArticle();
+    }
+    renderDailyStats();
+    scheduleDailyStatsServerSave();
+  } catch {
+    // Keep the browser copy if the local server is temporarily unavailable.
+  }
+}
+
+function mergeDailyStats(localStats, serverStats) {
+  const merged = { ...normalizeDailyStats(serverStats) };
+  Object.entries(normalizeDailyStats(localStats)).forEach(([date, value]) => {
+    const current = merged[date] || { sentences: 0, sessions: 0, words: 0 };
+    merged[date] = {
+      sentences: Math.max(current.sentences || 0, value.sentences || 0),
+      sessions: Math.max(current.sessions || 0, value.sessions || 0),
+      words: Math.max(current.words || 0, value.words || 0),
+    };
+  });
+  return merged;
+}
+
+function mergeArticleProgress(localProgress, serverProgress) {
+  const merged = { ...normalizeArticleProgress(serverProgress) };
+  Object.entries(normalizeArticleProgress(localProgress)).forEach(([key, value]) => {
+    const current = merged[key];
+    if (!current || String(value.updatedAt).localeCompare(String(current.updatedAt)) >= 0) {
+      merged[key] = value;
+    }
+  });
+  return limitArticleProgress(merged);
+}
+
+function earliestDateKey(keys) {
+  return keys.filter(isDateKey).sort()[0] || "";
+}
+
+function pruneDailyStats() {
+  const keepDates = new Set(Array.from({ length: 365 }, (_, offset) => {
+    const date = new Date();
+    date.setDate(date.getDate() - offset);
+    return localDateKey(date);
+  }));
+
+  Object.keys(state.dailyStats).forEach((date) => {
+    if (!keepDates.has(date)) delete state.dailyStats[date];
+  });
+}
+
+function renderDailyStats() {
+  const today = localDateKey();
+
+  const summaryRows = Array.from({ length: 2 }, (_, offset) => {
+    const date = addDays(new Date(), -offset);
+    const key = localDateKey(date);
+    const value = state.dailyStats[key] || { sentences: 0, sessions: 0 };
+    const label = offset === 0 ? "今天" : offset === 1 ? "昨天" : `${date.getMonth() + 1}/${date.getDate()}`;
+    return { key, value, label };
+  });
+
+  const visibleRows = summaryRows.map(renderDailyStatRow).join("");
+  const calendarDays = dailyStatsCalendarDays();
+  const maxSentences = Math.max(1, ...calendarDays.map(({ value }) => value.sentences || 0));
+  const leadingBlanks = dateFromKey(calendarDays[0]?.key || today).getDay();
+  const blanks = Array.from({ length: leadingBlanks }, () => `<span class="calendar-blank"></span>`).join("");
+  const selectedKey = state.selectedDailyStatsDate || today;
+  const calendarCells = calendarDays.map(({ key, value }) => renderDailyCalendarCell(key, value, maxSentences, selectedKey)).join("");
+  const selectedValue = state.dailyStats[selectedKey] || { sentences: 0, sessions: 0 };
+  const toggleText = state.dailyStatsExpanded ? "收起日历统计" : "查看日历统计";
+  els.dailyStatsList.innerHTML = `
+    ${visibleRows}
+    <button class="daily-stats-toggle" type="button" data-daily-stats-toggle>
+      ${toggleText}
+    </button>
+    <div class="daily-stats-calendar" ${state.dailyStatsExpanded ? "" : "hidden"}>
+      <div class="daily-calendar-title">
+        <span>最近练习日历</span>
+        <small>颜色越深，背的句子越多</small>
+      </div>
+      <div class="daily-calendar-weekdays" aria-hidden="true">
+        <span>日</span><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span>
+      </div>
+      <div class="daily-calendar-grid" aria-label="每日背诵热力图">
+        ${blanks}${calendarCells}
+      </div>
+      <div class="daily-calendar-legend" aria-hidden="true">
+        <span>少</span>
+        <i></i><i></i><i></i><i></i>
+        <span>多</span>
+      </div>
+      <p class="daily-calendar-detail" data-daily-calendar-detail>
+        ${formatCalendarDetail(selectedKey, selectedValue)}
+      </p>
+    </div>
+  `;
+}
+
+function renderDailyStatRow({ key, value, label }) {
+  return `
+    <div class="daily-stat-row" data-date="${key}">
+      <span>${label}</span>
+      <strong>${value.sentences || 0} 句</strong>
+      <em>${value.sessions || 0} 次 · ${value.words || 0} 词</em>
+    </div>
+  `;
+}
+
+function dailyStatsCalendarDays() {
+  const today = localDateKey();
+  const minimumStart = localDateKey(addDays(new Date(), -27));
+  const storedStart = isDateKey(state.dailyStatsStartDate) ? state.dailyStatsStartDate : today;
+  const start = storedStart < minimumStart ? storedStart : minimumStart;
+  return datesBetween(start, today).map((key) => ({
+    key,
+    value: state.dailyStats[key] || { sentences: 0, sessions: 0 },
+  }));
+}
+
+function renderDailyCalendarCell(key, value, maxSentences, selectedKey) {
+  const sentences = value.sentences || 0;
+  const level = sentences ? Math.max(0.2, sentences / maxSentences) : 0;
+  const label = `${formatCalendarDateLabel(key)}，${sentences} 句，${value.sessions || 0} 次，${value.words || 0} 词`;
+  const levelStyle = sentences ? `style="--level: ${level.toFixed(2)}"` : "";
+  const todayClass = key === localDateKey() ? " today" : "";
+  return `
+    <button
+      class="daily-calendar-cell${key === selectedKey ? " selected" : ""}${todayClass}"
+      type="button"
+      data-calendar-date="${key}"
+      ${levelStyle}
+      aria-label="${label}"
+      title="${label}"
+    >
+      <span>${shortCalendarCellLabel(key)}</span>
+    </button>
+  `;
+}
+
+function formatCalendarDetail(key, value) {
+  return `${formatCalendarDateLabel(key)}：${value.sentences || 0} 句，${value.sessions || 0} 次，${value.words || 0} 词`;
+}
+
+function shortCalendarCellLabel(key) {
+  const date = dateFromKey(key);
+  return date.getDate() === 1 ? `${date.getMonth() + 1}/1` : String(date.getDate());
+}
+
+function formatCalendarDateLabel(key) {
+  const date = dateFromKey(key);
+  const today = localDateKey();
+  const yesterday = localDateKey(addDays(new Date(), -1));
+  if (key === today) return "今天";
+  if (key === yesterday) return "昨天";
+  return `${date.getMonth() + 1}/${date.getDate()}`;
+}
+
+function handleDailyStatsClick(event) {
+  const toggle = event.target.closest("[data-daily-stats-toggle]");
+  if (toggle) {
+    state.dailyStatsExpanded = !state.dailyStatsExpanded;
+    if (!state.selectedDailyStatsDate) state.selectedDailyStatsDate = localDateKey();
+    renderDailyStats();
+    return;
+  }
+
+  const cell = event.target.closest("[data-calendar-date]");
+  if (!cell) return;
+  state.selectedDailyStatsDate = cell.dataset.calendarDate;
+  document.querySelectorAll("[data-calendar-date]").forEach((button) => {
+    button.classList.toggle("selected", button === cell);
+  });
+  const detail = els.dailyStatsList.querySelector("[data-daily-calendar-detail]");
+  const value = state.dailyStats[state.selectedDailyStatsDate] || { sentences: 0, sessions: 0 };
+  if (detail) detail.textContent = formatCalendarDetail(state.selectedDailyStatsDate, value);
 }
 
 function jumpToRecognizedRange(event) {
@@ -1101,7 +1724,7 @@ function startReplayDrag(event) {
 
 function showNextWordHint() {
   if (!state.sentences.length) {
-    els.nextHintText.textContent = "请先导入文章。";
+    setNextHintText("请先导入文章。");
     return;
   }
 
@@ -1113,11 +1736,11 @@ function showNextWordHint() {
     .map((record) => record.text);
 
   if (!nextWords.length) {
-    els.nextHintText.textContent = "已经到文章末尾。";
+    setNextHintText("已经到文章末尾。");
     return;
   }
 
-  els.nextHintText.textContent = `下 4 词：${nextWords.join(" ")}`;
+  setNextHintText(`下 4 词：${nextWords.join(" ")}`);
 }
 
 function currentHintWordIndex() {
@@ -1190,13 +1813,19 @@ function resetAll() {
   state.recordingUrl = "";
   state.sentences = [];
   state.reciteCounts = [];
+  state.wordHistory = [];
+  state.articleKey = "";
   state.comparison = null;
   state.finalTranscript = "";
   state.interimTranscript = "";
+  state.lastRecognizedRange = null;
+  state.pendingStatsRange = null;
+  state.currentSessionCounted = false;
   els.pasteBox.value = "";
+  localStorage.removeItem(CURRENT_ARTICLE_TEXT_KEY);
   els.fileInput.value = "";
   els.liveTranscript.textContent = "等待开始背诵。";
-  els.nextHintText.textContent = "根据实时识别位置提示。";
+  setNextHintText("根据背诵位置提示");
   els.replayVideo.removeAttribute("src");
   els.replayVideo.load();
   els.replayDock.hidden = true;
@@ -1206,7 +1835,25 @@ function resetAll() {
   setImportStatus("");
   setRecordStatus("");
   renderArticle();
+  syncFloatingControls();
 }
 
-renderArticle();
+state.articleProgress = loadArticleProgress();
+state.dailyStats = loadDailyStats();
+state.dailyStatsStartDate = loadDailyStatsStartDate();
+state.selectedDailyStatsDate = localDateKey();
+pruneDailyStats();
+localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
+localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
+renderDailyStats();
+const savedArticleText = localStorage.getItem(CURRENT_ARTICLE_TEXT_KEY);
+if (savedArticleText) {
+  els.pasteBox.value = savedArticleText;
+  parseArticle(savedArticleText, { persist: false, status: false });
+  setImportStatus("已恢复上次导入的文章和累计纠错记录。");
+} else {
+  renderArticle();
+}
+loadDailyStatsFromServer();
 populateDeviceOptions();
+syncFloatingControls();

@@ -4,6 +4,8 @@
 
 ## 使用
 
+### 本机使用
+
 ```bash
 cd /Users/yuzhuluan/Documents/codex/english-reciter
 python3 server.py
@@ -14,6 +16,26 @@ python3 server.py
 ```text
 http://127.0.0.1:4173/
 ```
+
+`127.0.0.1` 只代表自己的电脑，不能直接发给别人访问。
+
+### 发给别人使用
+
+推荐先用 GitHub Pages 发布一个公开 HTTPS 链接：
+
+```text
+https://luka-luan.github.io/English-recitation/
+```
+
+这个版本可以导入文件、粘贴文章、背诵、录制、评分，并把每个人自己的统计保存在各自浏览器里。它是静态网页，所以不能使用本机后端功能，例如自动提取 YouTube 字幕。
+
+如果要保留完整后端功能，可以部署到 Render：
+
+1. 在 Render 新建 Web Service，连接这个 GitHub 仓库。
+2. Render 会读取 `render.yaml`。
+3. 部署成功后会得到一个 `https://...onrender.com` 网址，可以直接发给别人。
+
+Render 完整版支持 `/api/subtitles` 和 `/api/state`，但免费服务可能会休眠，第一次打开会慢一些。
 
 ## 功能
 

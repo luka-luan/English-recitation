@@ -6,14 +6,16 @@ import re
 import shutil
 import subprocess
 import tempfile
+import argparse
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
-MAX_BODY_BYTES = 16 * 1024
+MAX_BODY_BYTES = 2 * 1024 * 1024
 YTDLP_TIMEOUT_SECONDS = 90
+STATE_PATH = ROOT / ".data" / "reciter-state.json"
 
 
 class ReciterHandler(SimpleHTTPRequestHandler):
@@ -23,7 +25,18 @@ class ReciterHandler(SimpleHTTPRequestHandler):
         return str((ROOT / clean_path).resolve())
 
     def do_POST(self):
-        if urlparse(self.path).path != "/api/subtitles":
+        api_path = urlparse(self.path).path
+        if api_path == "/api/state":
+            try:
+                payload = self.read_json_body()
+                state = sanitize_state(payload)
+                save_state(state)
+                self.write_json(200, {"ok": True, **state})
+            except Exception as error:
+                self.write_json(500, {"ok": False, "message": f"统计保存失败：{error}"})
+            return
+
+        if api_path != "/api/subtitles":
             self.send_error(404, "Not found")
             return
 
@@ -57,9 +70,17 @@ class ReciterHandler(SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def end_headers(self):
+        if not self.path.startswith("/api/"):
+            self.send_header("cache-control", "no-store, max-age=0")
         if self.path.startswith("/api/"):
             self.send_header("access-control-allow-origin", "http://127.0.0.1:4173")
         super().end_headers()
+
+    def do_GET(self):
+        if urlparse(self.path).path == "/api/state":
+            self.write_json(200, {"ok": True, **load_state()})
+            return
+        super().do_GET()
 
 
 class SubtitleError(Exception):
@@ -71,6 +92,112 @@ class SubtitleError(Exception):
 def is_supported_url(url):
     parsed = urlparse(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def sanitize_state(payload):
+    daily_stats = payload.get("dailyStats") if isinstance(payload, dict) else {}
+    if not isinstance(daily_stats, dict):
+        daily_stats = {}
+
+    clean_stats = {}
+    for date, value in daily_stats.items():
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(date)):
+            continue
+        if not isinstance(value, dict):
+            continue
+        clean_stats[str(date)] = {
+            "sentences": safe_count(value.get("sentences")),
+            "sessions": safe_count(value.get("sessions")),
+            "words": safe_count(value.get("words")),
+        }
+
+    start_date = payload.get("dailyStatsStartDate") if isinstance(payload, dict) else ""
+    if not isinstance(start_date, str) or not re.fullmatch(r"\d{4}-\d{2}-\d{2}", start_date):
+        start_date = sorted(clean_stats)[0] if clean_stats else ""
+
+    return {
+        "dailyStats": clean_stats,
+        "dailyStatsStartDate": start_date,
+        "articleProgress": sanitize_article_progress(payload.get("articleProgress") if isinstance(payload, dict) else {}),
+    }
+
+
+def sanitize_article_progress(source):
+    if not isinstance(source, dict):
+        return {}
+
+    clean_progress = {}
+    for key, value in source.items():
+        if len(clean_progress) >= 20:
+            break
+        if not re.fullmatch(r"article-[a-z0-9]{6,16}", str(key)):
+            continue
+        if not isinstance(value, dict):
+            continue
+
+        clean_progress[str(key)] = {
+            "reciteCounts": sanitize_count_list(value.get("reciteCounts"), 5000),
+            "wordHistory": sanitize_word_history(value.get("wordHistory"), 30000),
+            "updatedAt": sanitize_iso_text(value.get("updatedAt")),
+        }
+
+    return dict(sorted(
+        clean_progress.items(),
+        key=lambda item: item[1].get("updatedAt", ""),
+        reverse=True,
+    )[:20])
+
+
+def sanitize_count_list(source, limit):
+    if not isinstance(source, list):
+        return []
+    return [safe_count(item) for item in source[:limit]]
+
+
+def sanitize_word_history(source, limit):
+    if not isinstance(source, list):
+        return []
+
+    clean = []
+    for item in source[:limit]:
+        if not isinstance(item, dict):
+            clean.append({"correct": 0, "missed": 0})
+            continue
+        clean.append({
+            "correct": safe_count(item.get("correct")),
+            "missed": safe_count(item.get("missed")),
+        })
+    return clean
+
+
+def sanitize_iso_text(value):
+    if not isinstance(value, str):
+        return ""
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}T[0-9:.]+Z?", value):
+        return ""
+    return value[:40]
+
+
+def safe_count(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, number)
+
+
+def load_state():
+    try:
+        if not STATE_PATH.exists():
+            return {"dailyStats": {}, "dailyStatsStartDate": "", "articleProgress": {}}
+        return sanitize_state(json.loads(STATE_PATH.read_text(encoding="utf-8")))
+    except Exception:
+        return {"dailyStats": {}, "dailyStatsStartDate": "", "articleProgress": {}}
+
+
+def save_state(state):
+    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def extract_subtitles(url):
@@ -143,10 +270,18 @@ def clean_ytdlp_output(output):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="英语背诵工作台本地服务")
+    parser.add_argument("--host", default=os.environ.get("RECITER_HOST", "127.0.0.1"))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("RECITER_PORT", "4173")))
+    args = parser.parse_args()
+
     os.chdir(ROOT)
     mimetypes.add_type("text/javascript", ".js")
-    server = ThreadingHTTPServer(("127.0.0.1", 4173), ReciterHandler)
-    print("英语背诵工作台已启动：http://127.0.0.1:4173/", flush=True)
+    server = ThreadingHTTPServer((args.host, args.port), ReciterHandler)
+    display_host = "127.0.0.1" if args.host in {"0.0.0.0", "::"} else args.host
+    print(f"英语背诵工作台已启动：http://{display_host}:{args.port}/", flush=True)
+    if args.host == "0.0.0.0":
+        print("同一 Wi-Fi 下可用本机局域网 IP 访问，例如：http://你的电脑IP:4173/", flush=True)
     server.serve_forever()
 
 
