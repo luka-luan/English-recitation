@@ -78,6 +78,7 @@ const els = {
   floatingCameraBtn: document.querySelector("#floatingCameraBtn"),
   floatingRecordBtn: document.querySelector("#floatingRecordBtn"),
   floatingStopBtn: document.querySelector("#floatingStopBtn"),
+  floatingExportBtn: document.querySelector("#floatingExportBtn"),
 };
 
 els.fileInput.addEventListener("change", handleFileChange);
@@ -101,6 +102,7 @@ els.floatingHintBtn.addEventListener("click", showNextWordHint);
 els.floatingCameraBtn.addEventListener("click", toggleFloatingCamera);
 els.floatingRecordBtn.addEventListener("click", startRecitation);
 els.floatingStopBtn.addEventListener("click", stopRecitation);
+els.floatingExportBtn.addEventListener("click", exportPracticeData);
 els.dailyStatsList.addEventListener("click", handleDailyStatsClick);
 els.exportDataBtn.addEventListener("click", exportPracticeData);
 els.importDataBtn.addEventListener("click", () => els.dataImportInput.click());

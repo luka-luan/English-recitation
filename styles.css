@@ -844,7 +844,7 @@ body.camera-active #cameraPreview {
 
 .floating-mode-controls {
   display: grid;
-  grid-template-columns: repeat(3, auto);
+  grid-template-columns: repeat(4, auto);
   gap: 3px;
   padding: 3px;
   border: 1px solid var(--line);
@@ -870,6 +870,13 @@ body.camera-active #cameraPreview {
   background: #ffffff;
   color: var(--ink);
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.12);
+}
+
+#floatingExportBtn {
+  border-color: rgba(0, 122, 255, 0.28);
+  background: rgba(0, 122, 255, 0.08);
+  color: var(--accent-dark);
+  font-weight: 720;
 }
 
 .floating-result {

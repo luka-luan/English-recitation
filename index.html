@@ -9,7 +9,7 @@
         window.location.replace("http://127.0.0.1:4173/");
       }
     </script>
-    <link rel="stylesheet" href="./styles.css?v=20260617-zh-backup" />
+    <link rel="stylesheet" href="./styles.css?v=20260617-floating-backup" />
   </head>
   <body>
     <noscript>
@@ -124,6 +124,7 @@
       <button id="floatingCameraBtn">开摄像头</button>
       <button id="floatingRecordBtn" class="danger" disabled>开始</button>
       <button id="floatingStopBtn" disabled>结束</button>
+      <button id="floatingExportBtn" type="button">备份</button>
     </section>
     <section id="floatingResult" class="floating-result" hidden>
       <div>
@@ -139,6 +140,6 @@
     </div>
     <video id="cameraPreview" playsinline muted></video>
 
-    <script type="module" src="./app.js?v=20260617-zh-backup"></script>
+    <script type="module" src="./app.js?v=20260617-floating-backup"></script>
   </body>
 </html>
