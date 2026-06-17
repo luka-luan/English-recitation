@@ -1511,6 +1511,33 @@ function importPracticeData(payload) {
   setImportStatus("已导入并合并背诵数据。");
 }
 
+function importPracticeDataFromHash() {
+  const match = window.location.hash.match(/^#restore=([A-Za-z0-9_-]+)$/);
+  if (!match) return false;
+
+  try {
+    const jsonText = decodeBase64Url(match[1]);
+    const payload = JSON.parse(jsonText);
+    if (payload?.app !== "english-reciter") throw new Error("迁移链接里的数据格式不对。");
+    importPracticeData(payload);
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    setImportStatus("已从迁移链接恢复背诵数据。");
+    return true;
+  } catch (error) {
+    window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    setImportStatus(error.message || "迁移链接读取失败。");
+    return false;
+  }
+}
+
+function decodeBase64Url(value) {
+  const base64 = value.replace(/-/g, "+").replace(/_/g, "/");
+  const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+  const binary = window.atob(padded);
+  const bytes = Uint8Array.from(binary, (char) => char.charCodeAt(0));
+  return new TextDecoder().decode(bytes);
+}
+
 function limitArticleProgress(progress) {
   return Object.fromEntries(Object.entries(normalizeArticleProgress(progress))
     .sort((left, right) => String(right[1].updatedAt).localeCompare(String(left[1].updatedAt)))
@@ -1933,6 +1960,7 @@ if (savedArticleText) {
 } else {
   renderArticle();
 }
+importPracticeDataFromHash();
 loadDailyStatsFromServer();
 populateDeviceOptions();
 syncFloatingControls();
