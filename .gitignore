@@ -4,3 +4,4 @@ __pycache__/
 .env
 node_modules/
 .data/
+english-reciter-data-*.json

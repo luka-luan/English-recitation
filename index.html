@@ -9,7 +9,7 @@
         window.location.replace("http://127.0.0.1:4173/");
       }
     </script>
-    <link rel="stylesheet" href="./styles.css?v=20260617-data-migration" />
+    <link rel="stylesheet" href="./styles.css?v=20260617-link-history" />
   </head>
   <body>
     <noscript>
@@ -29,8 +29,12 @@
               <input id="fileInput" type="file" accept=".pdf,.txt,.md,.srt,.vtt,text/plain,application/pdf,text/vtt" />
             </label>
             <div class="url-import">
-              <input id="sourceUrl" type="url" placeholder="网页 / 字幕 / 视频链接" />
+              <input id="sourceUrl" type="url" placeholder="网页 / 字幕 / 视频链接" list="recentUrlOptions" />
               <button id="importUrlBtn">读取链接</button>
+              <select id="recentUrlSelect" class="recent-url-select" aria-label="最近链接" hidden>
+                <option value="">最近链接</option>
+              </select>
+              <datalist id="recentUrlOptions"></datalist>
             </div>
             <textarea id="pasteBox" placeholder="粘贴文章、字幕或中英交替文本。"></textarea>
             <div class="inline-actions">
@@ -134,6 +138,6 @@
     </div>
     <video id="cameraPreview" playsinline muted></video>
 
-    <script type="module" src="./app.js?v=20260617-data-migration"></script>
+    <script type="module" src="./app.js?v=20260617-link-history"></script>
   </body>
 </html>

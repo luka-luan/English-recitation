@@ -294,6 +294,12 @@ h2 {
   margin-top: 8px;
 }
 
+.recent-url-select {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 0.86rem;
+}
+
 .status {
   min-height: 21px;
   margin: 6px 0 0;

@@ -119,7 +119,27 @@ def sanitize_state(payload):
         "dailyStats": clean_stats,
         "dailyStatsStartDate": start_date,
         "articleProgress": sanitize_article_progress(payload.get("articleProgress") if isinstance(payload, dict) else {}),
+        "urlHistory": sanitize_url_history(payload.get("urlHistory") if isinstance(payload, dict) else []),
     }
+
+
+def sanitize_url_history(source):
+    if not isinstance(source, list):
+        return []
+
+    clean_urls = []
+    for value in source:
+        url = str(value).strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        if url in clean_urls:
+            continue
+        clean_urls.append(url[:2000])
+        if len(clean_urls) >= 30:
+            break
+
+    return clean_urls
 
 
 def sanitize_article_progress(source):
@@ -189,10 +209,10 @@ def safe_count(value):
 def load_state():
     try:
         if not STATE_PATH.exists():
-            return {"dailyStats": {}, "dailyStatsStartDate": "", "articleProgress": {}}
+            return {"dailyStats": {}, "dailyStatsStartDate": "", "articleProgress": {}, "urlHistory": []}
         return sanitize_state(json.loads(STATE_PATH.read_text(encoding="utf-8")))
     except Exception:
-        return {"dailyStats": {}, "dailyStatsStartDate": "", "articleProgress": {}}
+        return {"dailyStats": {}, "dailyStatsStartDate": "", "articleProgress": {}, "urlHistory": []}
 
 
 def save_state(state):

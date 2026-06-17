@@ -26,18 +26,22 @@ const state = {
   lastRecognizedRange: null,
   pendingStatsRange: null,
   currentSessionCounted: false,
+  urlHistory: [],
 };
 
 const DAILY_STATS_KEY = "english-reciter-daily-stats-v1";
 const DAILY_STATS_START_KEY = "english-reciter-daily-stats-start-v1";
 const ARTICLE_PROGRESS_KEY = "english-reciter-article-progress-v1";
 const CURRENT_ARTICLE_TEXT_KEY = "english-reciter-current-article-v1";
+const URL_HISTORY_KEY = "english-reciter-url-history-v1";
 let dailyStatsSaveTimer = 0;
 
 const els = {
   fileInput: document.querySelector("#fileInput"),
   sourceUrl: document.querySelector("#sourceUrl"),
   importUrlBtn: document.querySelector("#importUrlBtn"),
+  recentUrlSelect: document.querySelector("#recentUrlSelect"),
+  recentUrlOptions: document.querySelector("#recentUrlOptions"),
   pasteBox: document.querySelector("#pasteBox"),
   parseBtn: document.querySelector("#parseBtn"),
   translateBtn: document.querySelector("#translateBtn"),
@@ -80,6 +84,7 @@ els.importUrlBtn.addEventListener("click", handleUrlImport);
 els.sourceUrl.addEventListener("keydown", (event) => {
   if (event.key === "Enter") handleUrlImport();
 });
+els.recentUrlSelect.addEventListener("change", handleRecentUrlSelect);
 els.parseBtn.addEventListener("click", () => parseArticle(els.pasteBox.value));
 els.translateBtn.addEventListener("click", translateMissingLines);
 els.compactToggle.addEventListener("change", () => {
@@ -164,6 +169,7 @@ async function handleUrlImport() {
     setImportStatus("请先粘贴文章网页、字幕文件或视频链接。");
     return;
   }
+  rememberUrl(url);
 
   if (isLikelyVideoUrl(url)) {
     const loaded = await importVideoSubtitles(url);
@@ -231,8 +237,17 @@ function setUrlLoading(isLoading) {
   state.importingUrl = isLoading;
   els.importUrlBtn.disabled = isLoading;
   els.sourceUrl.disabled = isLoading;
+  els.recentUrlSelect.disabled = isLoading;
   els.importUrlBtn.textContent = isLoading ? "提取中..." : "读取链接";
   els.importUrlBtn.setAttribute("aria-busy", String(isLoading));
+}
+
+function handleRecentUrlSelect() {
+  const url = els.recentUrlSelect.value;
+  if (!url) return;
+  els.sourceUrl.value = url;
+  els.recentUrlSelect.value = "";
+  els.sourceUrl.focus();
 }
 
 async function readPdf(file) {
@@ -1359,6 +1374,71 @@ function safeStatCount(value) {
   return Number.isFinite(number) ? Math.max(0, Math.round(number)) : 0;
 }
 
+function loadUrlHistory() {
+  try {
+    return normalizeUrlHistory(JSON.parse(localStorage.getItem(URL_HISTORY_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function normalizeUrlHistory(source) {
+  if (!Array.isArray(source)) return [];
+  const unique = [];
+  source.forEach((value) => {
+    const url = String(value || "").trim();
+    if (!isRememberableUrl(url) || unique.includes(url)) return;
+    unique.push(url);
+  });
+  return unique.slice(0, 30);
+}
+
+function isRememberableUrl(value) {
+  try {
+    const url = new URL(value);
+    return url.protocol === "http:" || url.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function rememberUrl(url) {
+  const cleanUrl = String(url || "").trim();
+  if (!isRememberableUrl(cleanUrl)) return;
+  state.urlHistory = normalizeUrlHistory([cleanUrl, ...state.urlHistory]);
+  saveUrlHistory();
+  renderUrlHistory();
+}
+
+function saveUrlHistory() {
+  localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(normalizeUrlHistory(state.urlHistory)));
+  scheduleDailyStatsServerSave();
+}
+
+function renderUrlHistory() {
+  const urls = normalizeUrlHistory(state.urlHistory);
+  els.recentUrlOptions.innerHTML = urls
+    .map((url) => `<option value="${escapeHtml(url)}">${escapeHtml(compactUrlLabel(url))}</option>`)
+    .join("");
+
+  els.recentUrlSelect.hidden = !urls.length;
+  els.recentUrlSelect.innerHTML = [
+    `<option value="">最近链接</option>`,
+    ...urls.map((url) => `<option value="${escapeHtml(url)}">${escapeHtml(compactUrlLabel(url))}</option>`),
+  ].join("");
+}
+
+function compactUrlLabel(url) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, "");
+    const path = `${parsed.pathname}${parsed.search}`.replace(/\/$/, "");
+    return path ? `${host}${path}`.slice(0, 92) : host;
+  } catch {
+    return url.slice(0, 92);
+  }
+}
+
 function loadArticleProgress() {
   try {
     return normalizeArticleProgress(JSON.parse(localStorage.getItem(ARTICLE_PROGRESS_KEY) || "{}"));
@@ -1446,6 +1526,7 @@ function practiceDataPayload() {
     dailyStats: normalizeDailyStats(state.dailyStats),
     dailyStatsStartDate: isDateKey(state.dailyStatsStartDate) ? state.dailyStatsStartDate : localDateKey(),
     articleProgress: normalizeArticleProgress(state.articleProgress),
+    urlHistory: normalizeUrlHistory(state.urlHistory),
     currentArticleText: localStorage.getItem(CURRENT_ARTICLE_TEXT_KEY) || "",
   };
 }
@@ -1481,8 +1562,10 @@ async function handlePracticeDataImport(event) {
 function importPracticeData(payload) {
   const importedStats = normalizeDailyStats(payload.dailyStats);
   const importedProgress = normalizeArticleProgress(payload.articleProgress);
+  const importedUrls = normalizeUrlHistory(payload.urlHistory);
   state.dailyStats = mergeDailyStats(state.dailyStats, importedStats);
   state.articleProgress = mergeArticleProgress(state.articleProgress, importedProgress);
+  state.urlHistory = mergeUrlHistory(state.urlHistory, importedUrls);
   state.dailyStatsStartDate = earliestDateKey([
     state.dailyStatsStartDate,
     isDateKey(payload.dailyStatsStartDate) ? payload.dailyStatsStartDate : "",
@@ -1492,6 +1575,7 @@ function importPracticeData(payload) {
   localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
   localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
   localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+  localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(state.urlHistory));
 
   const currentArticleText = typeof payload.currentArticleText === "string" ? payload.currentArticleText.trim() : "";
   if (currentArticleText) {
@@ -1507,6 +1591,7 @@ function importPracticeData(payload) {
     renderArticle();
   }
   renderDailyStats();
+  renderUrlHistory();
   scheduleDailyStatsServerSave();
   setImportStatus("已导入并合并背诵数据。");
 }
@@ -1586,6 +1671,7 @@ async function saveDailyStatsToServer() {
         dailyStats: state.dailyStats,
         dailyStatsStartDate: state.dailyStatsStartDate,
         articleProgress: state.articleProgress,
+        urlHistory: state.urlHistory,
       }),
     });
   } catch {
@@ -1602,6 +1688,7 @@ async function loadDailyStatsFromServer() {
     const serverStats = normalizeDailyStats(data.dailyStats);
     state.dailyStats = mergeDailyStats(state.dailyStats, serverStats);
     state.articleProgress = mergeArticleProgress(state.articleProgress, normalizeArticleProgress(data.articleProgress));
+    state.urlHistory = mergeUrlHistory(state.urlHistory, normalizeUrlHistory(data.urlHistory));
     state.dailyStatsStartDate = earliestDateKey([
       state.dailyStatsStartDate,
       isDateKey(data.dailyStatsStartDate) ? data.dailyStatsStartDate : "",
@@ -1611,6 +1698,8 @@ async function loadDailyStatsFromServer() {
     localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
     localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
     localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+    localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(state.urlHistory));
+    renderUrlHistory();
     if (state.articleKey) {
       applyStoredArticleProgress();
       renderArticle();
@@ -1644,6 +1733,10 @@ function mergeArticleProgress(localProgress, serverProgress) {
     }
   });
   return limitArticleProgress(merged);
+}
+
+function mergeUrlHistory(localUrls, importedUrls) {
+  return normalizeUrlHistory([...normalizeUrlHistory(importedUrls), ...normalizeUrlHistory(localUrls)]);
 }
 
 function earliestDateKey(keys) {
@@ -1945,6 +2038,7 @@ function resetAll() {
 }
 
 state.articleProgress = loadArticleProgress();
+state.urlHistory = loadUrlHistory();
 state.dailyStats = loadDailyStats();
 state.dailyStatsStartDate = loadDailyStatsStartDate();
 state.selectedDailyStatsDate = localDateKey();
@@ -1952,6 +2046,7 @@ pruneDailyStats();
 localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(state.dailyStats));
 localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
 renderDailyStats();
+renderUrlHistory();
 const savedArticleText = localStorage.getItem(CURRENT_ARTICLE_TEXT_KEY);
 if (savedArticleText) {
   els.pasteBox.value = savedArticleText;
