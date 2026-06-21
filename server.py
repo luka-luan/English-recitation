@@ -110,6 +110,8 @@ class ReciterHandler(SimpleHTTPRequestHandler):
                 self.send_header("access-control-allow-origin", origin)
             self.send_header("access-control-allow-methods", "GET, POST, OPTIONS")
             self.send_header("access-control-allow-headers", "Authorization, Content-Type")
+            if self.headers.get("access-control-request-private-network", "").lower() == "true":
+                self.send_header("access-control-allow-private-network", "true")
             self.send_header("vary", "Origin")
         super().end_headers()
 
