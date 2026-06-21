@@ -1,4 +1,4 @@
-const CACHE_NAME = "english-reciter-20260621-v2";
+const CACHE_NAME = "english-reciter-20260622-v3";
 const APP_ASSETS = [
   "./",
   "./index.html",
