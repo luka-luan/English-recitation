@@ -282,6 +282,12 @@ def choose_subtitle(paths):
 
 
 def clean_ytdlp_output(output):
+    lowered = output.lower()
+    if "sign in to confirm you’re not a bot" in lowered or "sign in to confirm you're not a bot" in lowered:
+        return "YouTube 要求验证这次访问，服务器暂时无法提取该视频字幕。这是 YouTube 对云服务器的限制，可以稍后重试或导入 .srt/.vtt 字幕。"
+    if "no subtitles" in lowered or "there are no subtitles" in lowered:
+        return "该视频没有可下载的字幕轨道。"
+
     lines = [line.strip() for line in output.splitlines() if line.strip()]
     useful = [line for line in lines if line.lower().startswith(("error:", "warning:", "[youtube]", "[bilibili]", "[info]"))]
     message = "\n".join(useful[-6:] or lines[-6:])

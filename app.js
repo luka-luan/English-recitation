@@ -200,8 +200,8 @@ async function handleUrlImport() {
   rememberUrl(url);
 
   if (isLikelyVideoUrl(url)) {
-    const loaded = await importVideoSubtitles(url);
-    if (loaded) return;
+    await importVideoSubtitles(url);
+    return;
   }
 
   setImportStatus("正在尝试读取链接...");
