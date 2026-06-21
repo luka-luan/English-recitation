@@ -9,7 +9,13 @@
         window.location.replace("http://127.0.0.1:4173/");
       }
     </script>
-    <link rel="stylesheet" href="./styles.css?v=20260617-supabase-sync" />
+    <meta name="theme-color" content="#f5f5f7" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-title" content="英语背诵" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+    <link rel="stylesheet" href="./styles.css?v=20260621-cloud-library" />
   </head>
   <body>
     <noscript>
@@ -50,6 +56,15 @@
               <input id="compactToggle" type="checkbox" />
               <span>紧凑显示</span>
             </label>
+          </div>
+
+          <div class="panel-section library-section">
+            <div class="section-title-row">
+              <h2>文章库</h2>
+              <span id="articleLibraryCount">0 篇</span>
+            </div>
+            <input id="articleSearch" type="search" placeholder="搜索文章" aria-label="搜索文章" />
+            <div id="articleLibrary" class="article-library"></div>
           </div>
 
           <div class="panel-section stats-section">
@@ -155,6 +170,6 @@
     </div>
     <video id="cameraPreview" playsinline muted></video>
 
-    <script type="module" src="./app.js?v=20260617-supabase-sync"></script>
+    <script type="module" src="./app.js?v=20260621-cloud-library"></script>
   </body>
 </html>

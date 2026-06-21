@@ -32,19 +32,32 @@ const state = {
   cloudReady: false,
   cloudSaving: false,
   cloudApplying: false,
+  cloudV2Ready: false,
+  articles: [],
+  cloudSessions: [],
+  pendingSessions: [],
+  currentArticleMeta: null,
 };
 
 const SUPABASE_URL = "https://owwvxgqiarhqmepajorf.supabase.co";
 const SUPABASE_PUBLISHABLE_KEY = "sb_publishable_q-HR6ZeIAZBzYPOvRkfmmw_TSjMw8ev";
 const SUPABASE_DATA_TABLE = "reciter_data";
+const SUPABASE_ARTICLES_TABLE = "reciter_articles";
+const SUPABASE_SESSIONS_TABLE = "reciter_sessions";
+const PUBLIC_SUBTITLE_API = "https://english-recitation.onrender.com/api/subtitles";
 const DAILY_STATS_KEY = "english-reciter-daily-stats-v1";
 const DAILY_STATS_START_KEY = "english-reciter-daily-stats-start-v1";
 const ARTICLE_PROGRESS_KEY = "english-reciter-article-progress-v1";
 const CURRENT_ARTICLE_TEXT_KEY = "english-reciter-current-article-v1";
 const URL_HISTORY_KEY = "english-reciter-url-history-v1";
 const PRACTICE_BACKUP_KEY = "english-reciter-practice-backup-v1";
+const ARTICLE_LIBRARY_KEY = "english-reciter-article-library-v2";
+const PENDING_SESSIONS_KEY = "english-reciter-pending-sessions-v2";
+const CLOUD_V2_MIGRATED_KEY = "english-reciter-cloud-v2-migrated";
 let dailyStatsSaveTimer = 0;
 let cloudSaveTimer = 0;
+let cloudArticleSaveTimer = 0;
+let queuedArticleSave = null;
 
 const els = {
   fileInput: document.querySelector("#fileInput"),
@@ -97,6 +110,9 @@ const els = {
   cloudPushBtn: document.querySelector("#cloudPushBtn"),
   cloudLogoutBtn: document.querySelector("#cloudLogoutBtn"),
   cloudUserLabel: document.querySelector("#cloudUserLabel"),
+  articleSearch: document.querySelector("#articleSearch"),
+  articleLibrary: document.querySelector("#articleLibrary"),
+  articleLibraryCount: document.querySelector("#articleLibraryCount"),
 };
 
 els.fileInput.addEventListener("change", handleFileChange);
@@ -132,6 +148,8 @@ els.dailyStatsList.addEventListener("click", handleDailyStatsClick);
 els.exportDataBtn.addEventListener("click", exportPracticeData);
 els.importDataBtn.addEventListener("click", () => els.dataImportInput.click());
 els.dataImportInput.addEventListener("change", handlePracticeDataImport);
+els.articleSearch.addEventListener("input", renderArticleLibrary);
+els.articleLibrary.addEventListener("click", handleArticleLibraryClick);
 
 document.querySelectorAll("[data-hide-mode]").forEach((button) => {
   button.addEventListener("click", () => setHideMode(button.dataset.hideMode));
@@ -183,7 +201,10 @@ async function handleFileChange(event) {
       ? await readPdf(file)
       : await file.text();
     els.pasteBox.value = text.trim();
-    parseArticle(text);
+    parseArticle(text, {
+      title: file.name.replace(/\.[^.]+$/, ""),
+      sourceUrl: "",
+    });
   } catch (error) {
     setImportStatus(error.message || "文件读取失败。");
   }
@@ -212,7 +233,7 @@ async function handleUrlImport() {
     const raw = await response.text();
     const text = contentType.includes("html") ? htmlToReadableText(raw) : raw;
     els.pasteBox.value = text.trim();
-    parseArticle(text);
+    parseArticle(text, { title: compactUrlLabel(url), sourceUrl: url });
   } catch {
     const loaded = await importVideoSubtitles(url, "网页读取失败，正在尝试用本地 yt-dlp 识别字幕...");
     if (loaded) return;
@@ -221,13 +242,12 @@ async function handleUrlImport() {
 }
 
 async function importVideoSubtitles(url, message = "正在用本地 yt-dlp 提取视频字幕...") {
-  if (isStaticPublicHost()) {
-    setImportStatus("当前公开静态版本没有后端字幕服务。请导入 .srt/.vtt 字幕文件，或把字幕文本粘贴进来。若要自动提取视频字幕，需要部署 Render 完整版。");
-    return false;
-  }
-
   setUrlLoading(true);
-  setImportStatus(message);
+  const isLocal = isLoopbackHost() || ["4173", "4174"].includes(window.location.port);
+  const apiUrl = isLocal || window.location.hostname.endsWith("onrender.com")
+    ? "/api/subtitles"
+    : PUBLIC_SUBTITLE_API;
+  setImportStatus(isLocal ? message : "正在通过字幕服务提取，首次唤醒可能需要约一分钟...");
   const controller = new AbortController();
   const timeoutId = window.setTimeout(() => controller.abort(), 100000);
   const progressId = window.setTimeout(() => {
@@ -235,9 +255,12 @@ async function importVideoSubtitles(url, message = "正在用本地 yt-dlp 提�
   }, 8000);
 
   try {
-    const response = await fetch("/api/subtitles", {
+    const headers = { "content-type": "application/json" };
+    const accessToken = state.cloudSession?.access_token;
+    if (!isLocal && accessToken) headers.authorization = `Bearer ${accessToken}`;
+    const response = await fetch(apiUrl, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers,
       body: JSON.stringify({ url }),
       signal: controller.signal,
     });
@@ -245,13 +268,16 @@ async function importVideoSubtitles(url, message = "正在用本地 yt-dlp 提�
     if (!data) throw new Error("当前网址没有可用的后端字幕服务。");
     if (!response.ok || !data.ok) throw new Error(data.message || "字幕提取失败。");
     els.pasteBox.value = data.text.trim();
-    parseArticle(data.text);
+    parseArticle(data.text, {
+      title: data.title || compactUrlLabel(url),
+      sourceUrl: data.source_url || url,
+    });
     setImportStatus(`已从视频字幕生成 ${state.sentences.length} 句。字幕轨道：${data.track}`);
     return true;
   } catch (error) {
     const message = error.name === "AbortError"
       ? "字幕提取超时了。可以再试一次，或换一个带字幕的视频。"
-      : `${error.message} 可以换一个带字幕的视频，或导入 .srt/.vtt 字幕文件。`;
+      : `${error.message}${isLocal ? "" : " 可以在电脑打开 http://127.0.0.1:4173/ 用本机网络导入。"}`;
     setImportStatus(message);
     return false;
   } finally {
@@ -340,6 +366,17 @@ function parseArticle(rawText, options = {}) {
 
   state.sentences = buildSmartSentencePairs(cleanedText);
   state.articleKey = articleKeyForSentences(state.sentences);
+  const existingArticle = state.articles.find((item) => item.articleKey === state.articleKey);
+  const now = new Date().toISOString();
+  state.currentArticleMeta = {
+    articleKey: state.articleKey,
+    title: options.title || existingArticle?.title || articleTitleFromText(cleanedText),
+    sourceUrl: options.sourceUrl ?? existingArticle?.sourceUrl ?? "",
+    content: cleanedText,
+    createdAt: existingArticle?.createdAt || now,
+    updatedAt: options.preserveTimestamps ? existingArticle?.updatedAt || now : now,
+    lastOpenedAt: options.preserveTimestamps ? existingArticle?.lastOpenedAt || now : now,
+  };
   applyStoredArticleProgress();
   state.comparison = null;
   state.finalTranscript = "";
@@ -349,10 +386,109 @@ function parseArticle(rawText, options = {}) {
   state.currentSessionCounted = false;
   els.liveTranscript.textContent = "等待开始背诵。";
   els.floatingResult.hidden = true;
-  if (shouldPersist) localStorage.setItem(CURRENT_ARTICLE_TEXT_KEY, cleanedText);
+  if (shouldPersist) {
+    localStorage.setItem(CURRENT_ARTICLE_TEXT_KEY, cleanedText);
+    saveCurrentArticleToLibrary();
+    savePracticeBackup();
+  }
   renderArticle();
+  renderArticleLibrary();
   syncFloatingControls();
   if (shouldReport) setImportStatus(`已生成 ${state.sentences.length} 句。已自动识别英文和中文。`);
+}
+
+function articleTitleFromText(text) {
+  const firstLine = text.split(/\n+/).map((line) => line.trim()).find(Boolean) || "未命名文章";
+  return firstLine.replace(/^\d+[.)、\s]+/, "").slice(0, 64);
+}
+
+function normalizeArticleLibrary(source) {
+  if (!Array.isArray(source)) return [];
+  const unique = new Map();
+  source.forEach((item) => {
+    if (!item || !isArticleKey(item.articleKey) || typeof item.content !== "string" || !item.content.trim()) return;
+    const normalized = {
+      articleKey: item.articleKey,
+      title: String(item.title || articleTitleFromText(item.content)).slice(0, 160),
+      sourceUrl: String(item.sourceUrl || "").slice(0, 2000),
+      content: item.content.trim(),
+      createdAt: String(item.createdAt || item.updatedAt || new Date().toISOString()),
+      updatedAt: String(item.updatedAt || new Date().toISOString()),
+      lastOpenedAt: String(item.lastOpenedAt || item.updatedAt || new Date().toISOString()),
+      baselineReciteCounts: normalizeCountArray(item.baselineReciteCounts),
+      baselineWordHistory: normalizeWordHistory(item.baselineWordHistory),
+    };
+    const current = unique.get(normalized.articleKey);
+    if (!current || normalized.updatedAt >= current.updatedAt) unique.set(normalized.articleKey, normalized);
+  });
+  return [...unique.values()].sort((a, b) => b.lastOpenedAt.localeCompare(a.lastOpenedAt));
+}
+
+function loadArticleLibrary() {
+  try {
+    return normalizeArticleLibrary(JSON.parse(localStorage.getItem(ARTICLE_LIBRARY_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function persistArticleLibrary() {
+  state.articles = normalizeArticleLibrary(state.articles);
+  localStorage.setItem(ARTICLE_LIBRARY_KEY, JSON.stringify(state.articles));
+}
+
+function saveCurrentArticleToLibrary() {
+  if (!state.currentArticleMeta || !state.articleKey) return;
+  const existing = state.articles.find((item) => item.articleKey === state.articleKey);
+  const record = {
+    ...existing,
+    ...state.currentArticleMeta,
+    baselineReciteCounts: existing?.baselineReciteCounts || normalizeCountArray(state.reciteCounts),
+    baselineWordHistory: existing?.baselineWordHistory || normalizeWordHistory(state.wordHistory),
+  };
+  state.articles = normalizeArticleLibrary([record, ...state.articles]);
+  persistArticleLibrary();
+  scheduleCloudArticleSave(record);
+}
+
+function renderArticleLibrary() {
+  const query = (els.articleSearch.value || "").trim().toLowerCase();
+  const articles = normalizeArticleLibrary(state.articles).filter((item) => {
+    const haystack = `${item.title} ${item.sourceUrl}`.toLowerCase();
+    return !query || haystack.includes(query);
+  });
+  els.articleLibraryCount.textContent = `${state.articles.length} 篇`;
+  if (!articles.length) {
+    els.articleLibrary.innerHTML = `<p class="library-empty">${query ? "没有匹配文章" : "导入后会保存在这里"}</p>`;
+    return;
+  }
+  els.articleLibrary.innerHTML = articles.map((item) => `
+    <div class="library-item${item.articleKey === state.articleKey ? " active" : ""}">
+      <button class="library-open" type="button" data-open-article="${escapeHtml(item.articleKey)}" title="${escapeHtml(item.title)}">${escapeHtml(item.title)}</button>
+      <small>${escapeHtml(item.sourceUrl ? compactUrlLabel(item.sourceUrl) : formatCloudTime(item.updatedAt))}</small>
+      <button class="library-delete" type="button" data-delete-article="${escapeHtml(item.articleKey)}" title="删除文章" aria-label="删除文章">×</button>
+    </div>
+  `).join("");
+}
+
+async function handleArticleLibraryClick(event) {
+  const openButton = event.target.closest("[data-open-article]");
+  if (openButton) {
+    const item = state.articles.find((article) => article.articleKey === openButton.dataset.openArticle);
+    if (!item) return;
+    item.lastOpenedAt = new Date().toISOString();
+    persistArticleLibrary();
+    els.pasteBox.value = item.content;
+    parseArticle(item.content, { title: item.title, sourceUrl: item.sourceUrl });
+    setImportStatus(`已打开《${item.title}》。`);
+    return;
+  }
+
+  const deleteButton = event.target.closest("[data-delete-article]");
+  if (!deleteButton) return;
+  const item = state.articles.find((article) => article.articleKey === deleteButton.dataset.deleteArticle);
+  if (!item || !window.confirm(`删除《${item.title}》及其云端背诵记录？`)) return;
+  await deleteArticleEverywhere(item.articleKey);
 }
 
 function buildSmartSentencePairs(rawText) {
@@ -1331,6 +1467,7 @@ function recordDailyWork(activeRange) {
   state.currentSessionCounted = true;
   pruneDailyStats();
   saveDailyStats();
+  queuePracticeSession(activeRange);
   renderDailyStats();
   return { sentences: sentenceCount, sessions: 1, words: wordCount, counted: true };
 }
@@ -1541,32 +1678,35 @@ function saveArticleProgress() {
     wordHistory: normalizeWordHistory(state.wordHistory, expectedWordCount()),
     updatedAt: new Date().toISOString(),
   };
-  state.articleProgress = limitArticleProgress(state.articleProgress);
   localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+  saveCurrentArticleToLibrary();
   savePracticeBackup();
   scheduleDailyStatsServerSave();
 }
 
-function practiceDataPayload() {
-  return {
+function practiceDataPayload(options = {}) {
+  const payload = {
     app: "english-reciter",
-    version: 1,
+    version: 2,
     exportedAt: new Date().toISOString(),
     dailyStats: normalizeDailyStats(state.dailyStats),
     dailyStatsStartDate: isDateKey(state.dailyStatsStartDate) ? state.dailyStatsStartDate : localDateKey(),
     articleProgress: normalizeArticleProgress(state.articleProgress),
     urlHistory: normalizeUrlHistory(state.urlHistory),
     currentArticleText: localStorage.getItem(CURRENT_ARTICLE_TEXT_KEY) || "",
+    cloudV2Migrated: localStorage.getItem(CLOUD_V2_MIGRATED_KEY) === "1",
   };
+  if (options.includeLibrary) payload.articleLibrary = normalizeArticleLibrary(state.articles);
+  return payload;
 }
 
 function savePracticeBackup() {
-  localStorage.setItem(PRACTICE_BACKUP_KEY, JSON.stringify(practiceDataPayload()));
+  localStorage.setItem(PRACTICE_BACKUP_KEY, JSON.stringify(practiceDataPayload({ includeLibrary: true })));
   scheduleCloudSave();
 }
 
 function exportPracticeData() {
-  const payload = practiceDataPayload();
+  const payload = practiceDataPayload({ includeLibrary: true });
   const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -1597,9 +1737,12 @@ function importPracticeData(payload, options = {}) {
   const importedStats = normalizeDailyStats(payload.dailyStats);
   const importedProgress = normalizeArticleProgress(payload.articleProgress);
   const importedUrls = normalizeUrlHistory(payload.urlHistory);
+  const importedArticles = normalizeArticleLibrary(payload.articleLibrary);
+  if (payload.cloudV2Migrated === true) localStorage.setItem(CLOUD_V2_MIGRATED_KEY, "1");
   state.dailyStats = mergeDailyStats(state.dailyStats, importedStats);
   state.articleProgress = mergeArticleProgress(state.articleProgress, importedProgress);
   state.urlHistory = mergeUrlHistory(state.urlHistory, importedUrls);
+  state.articles = mergeArticleLibraries(state.articles, importedArticles);
   state.dailyStatsStartDate = earliestDateKey([
     state.dailyStatsStartDate,
     isDateKey(payload.dailyStatsStartDate) ? payload.dailyStatsStartDate : "",
@@ -1610,6 +1753,7 @@ function importPracticeData(payload, options = {}) {
   localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
   localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
   localStorage.setItem(URL_HISTORY_KEY, JSON.stringify(state.urlHistory));
+  persistArticleLibrary();
   savePracticeBackup();
 
   const currentArticleText = typeof payload.currentArticleText === "string" ? payload.currentArticleText.trim() : "";
@@ -1618,6 +1762,7 @@ function importPracticeData(payload, options = {}) {
     if (!state.sentences.length) {
       els.pasteBox.value = currentArticleText;
       parseArticle(currentArticleText, { persist: false, status: false });
+      saveCurrentArticleToLibrary();
     }
   }
 
@@ -1627,6 +1772,7 @@ function importPracticeData(payload, options = {}) {
   }
   renderDailyStats();
   renderUrlHistory();
+  renderArticleLibrary();
   scheduleDailyStatsServerSave();
   if (options.status !== false) setImportStatus(options.statusMessage || "已导入并合并背诵数据。");
 }
@@ -1698,6 +1844,7 @@ async function applyCloudSession(session) {
 
   setCloudStatus("已登录，正在合并云端数据...");
   await pullCloudData({ silentWhenEmpty: true });
+  await syncCloudV2();
 }
 
 async function sendCloudLoginLink() {
@@ -1842,10 +1989,354 @@ function cloudErrorMessage(error) {
   return message;
 }
 
+function scheduleCloudArticleSave(record = state.currentArticleMeta) {
+  if (!record || state.cloudApplying) return;
+  queuedArticleSave = { ...record };
+  window.clearTimeout(cloudArticleSaveTimer);
+  cloudArticleSaveTimer = window.setTimeout(async () => {
+    const next = queuedArticleSave;
+    queuedArticleSave = null;
+    if (next) await pushCloudArticle(next);
+  }, 500);
+}
+
+async function pushCloudArticle(record) {
+  if (!state.cloudClient || !state.cloudSession?.user || !record?.articleKey || !state.cloudV2Ready) return;
+  const userId = state.cloudSession.user.id;
+  const existing = state.articles.find((item) => item.articleKey === record.articleKey) || record;
+  try {
+    const { data, error: readError } = await state.cloudClient
+      .from(SUPABASE_ARTICLES_TABLE)
+      .select("article_key")
+      .eq("user_id", userId)
+      .eq("article_key", record.articleKey)
+      .maybeSingle();
+    if (readError) throw readError;
+
+    const metadata = {
+      title: record.title || articleTitleFromText(record.content),
+      source_url: record.sourceUrl || "",
+      content: record.content,
+      updated_at: record.updatedAt || new Date().toISOString(),
+      last_opened_at: record.lastOpenedAt || new Date().toISOString(),
+    };
+    const query = data
+      ? state.cloudClient.from(SUPABASE_ARTICLES_TABLE).update(metadata)
+        .eq("user_id", userId).eq("article_key", record.articleKey)
+      : state.cloudClient.from(SUPABASE_ARTICLES_TABLE).insert({
+        user_id: userId,
+        article_key: record.articleKey,
+        ...metadata,
+        baseline_recite_counts: existing.baselineReciteCounts || normalizeCountArray(state.reciteCounts),
+        baseline_word_history: existing.baselineWordHistory || normalizeWordHistory(state.wordHistory),
+        created_at: record.createdAt || new Date().toISOString(),
+      });
+    const { error } = await query;
+    if (error) throw error;
+  } catch (error) {
+    if (isCloudV2Missing(error)) state.cloudV2Ready = false;
+    setCloudStatus(`文章暂未同步：${cloudErrorMessage(error)}`);
+  }
+}
+
+async function syncCloudV2() {
+  if (!state.cloudClient || !state.cloudSession?.user) return;
+  const userId = state.cloudSession.user.id;
+  try {
+    const [articleResult, sessionResult] = await Promise.all([
+      state.cloudClient.from(SUPABASE_ARTICLES_TABLE).select("*").eq("user_id", userId),
+      state.cloudClient.from(SUPABASE_SESSIONS_TABLE).select("*").eq("user_id", userId),
+    ]);
+    if (articleResult.error) throw articleResult.error;
+    if (sessionResult.error) throw sessionResult.error;
+    state.cloudV2Ready = true;
+    state.cloudApplying = true;
+
+    const cloudArticles = articleResult.data.map(articleFromCloudRow);
+    state.articles = mergeArticleLibraries(state.articles, cloudArticles);
+    persistArticleLibrary();
+    state.cloudSessions = normalizeCloudSessions(sessionResult.data);
+
+    await migrateLegacyDataToV2();
+    await flushPendingSessions();
+    rebuildDailyStatsFromSessions();
+    restoreCurrentArticleFromLibrary();
+    renderArticleLibrary();
+    state.cloudApplying = false;
+    scheduleCloudArticleSave();
+    setCloudStatus(`云同步完成：${state.articles.length} 篇文章，${state.cloudSessions.length} 次记录。`);
+  } catch (error) {
+    state.cloudApplying = false;
+    state.cloudV2Ready = false;
+    const message = isCloudV2Missing(error)
+      ? "请先在 Supabase SQL Editor 运行 supabase-v2.sql"
+      : cloudErrorMessage(error);
+    setCloudStatus(`新版云同步未启用：${message}。旧版备份仍然保留。`);
+  }
+}
+
+function articleFromCloudRow(row) {
+  return {
+    articleKey: row.article_key,
+    title: row.title,
+    sourceUrl: row.source_url,
+    content: row.content,
+    baselineReciteCounts: normalizeCountArray(row.baseline_recite_counts),
+    baselineWordHistory: normalizeWordHistory(row.baseline_word_history),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    lastOpenedAt: row.last_opened_at,
+  };
+}
+
+function mergeArticleLibraries(localArticles, cloudArticles) {
+  return normalizeArticleLibrary([...cloudArticles, ...localArticles].reduce((result, item) => {
+    const existingIndex = result.findIndex((candidate) => candidate.articleKey === item.articleKey);
+    if (existingIndex < 0) result.push(item);
+    else if (String(item.updatedAt) > String(result[existingIndex].updatedAt)) result[existingIndex] = item;
+    return result;
+  }, []));
+}
+
+function normalizeCloudSessions(source) {
+  if (!Array.isArray(source)) return [];
+  const unique = new Map();
+  source.forEach((item) => {
+    if (!item?.id || !/^\d{4}-\d{2}-\d{2}$/.test(item.practice_date || item.practiceDate || "")) return;
+    const session = {
+      id: String(item.id),
+      articleKey: String(item.article_key ?? item.articleKey ?? ""),
+      practiceDate: item.practice_date || item.practiceDate,
+      sentenceStart: nullableCount(item.sentence_start ?? item.sentenceStart),
+      sentenceEnd: nullableCount(item.sentence_end ?? item.sentenceEnd),
+      wordStart: nullableCount(item.word_start ?? item.wordStart),
+      wordEnd: nullableCount(item.word_end ?? item.wordEnd),
+      sentenceCount: safeStatCount(item.sentence_count ?? item.sentenceCount),
+      wordCount: safeStatCount(item.word_count ?? item.wordCount),
+      attempts: Math.max(1, safeStatCount(item.attempts || 1)),
+      correctIndexes: normalizeIndexArray(item.correct_indexes ?? item.correctIndexes),
+      missedIndexes: normalizeIndexArray(item.missed_indexes ?? item.missedIndexes),
+      accuracy: nullableCount(item.accuracy),
+      transcript: String(item.transcript || "").slice(0, 12000),
+      createdAt: String(item.created_at || item.createdAt || new Date().toISOString()),
+    };
+    unique.set(session.id, session);
+  });
+  return [...unique.values()].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+function nullableCount(value) {
+  return value === null || value === undefined || value === "" ? null : safeStatCount(value);
+}
+
+function normalizeIndexArray(source) {
+  if (!Array.isArray(source)) return [];
+  return [...new Set(source.map(safeStatCount))].slice(0, 10000);
+}
+
+function sessionToCloudRow(session) {
+  return {
+    user_id: state.cloudSession.user.id,
+    id: session.id,
+    article_key: session.articleKey,
+    practice_date: session.practiceDate,
+    sentence_start: session.sentenceStart,
+    sentence_end: session.sentenceEnd,
+    word_start: session.wordStart,
+    word_end: session.wordEnd,
+    sentence_count: session.sentenceCount,
+    word_count: session.wordCount,
+    attempts: session.attempts,
+    correct_indexes: session.correctIndexes,
+    missed_indexes: session.missedIndexes,
+    accuracy: session.accuracy,
+    transcript: session.transcript,
+    created_at: session.createdAt,
+  };
+}
+
+async function migrateLegacyDataToV2() {
+  if (!state.cloudV2Ready) return;
+  if (localStorage.getItem(CLOUD_V2_MIGRATED_KEY) === "1") return;
+  for (const article of state.articles) await pushCloudArticle(article);
+
+  const pendingByDate = {};
+  state.pendingSessions.forEach((session) => {
+    const current = pendingByDate[session.practiceDate] || { sentences: 0, sessions: 0, words: 0 };
+    pendingByDate[session.practiceDate] = {
+      sentences: current.sentences + session.sentenceCount,
+      sessions: current.sessions + session.attempts,
+      words: current.words + session.wordCount,
+    };
+  });
+  const legacySessions = Object.entries(normalizeDailyStats(state.dailyStats)).map(([date, value]) => {
+    const pending = pendingByDate[date] || { sentences: 0, sessions: 0, words: 0 };
+    return {
+    id: `legacy-${date}`,
+    articleKey: "",
+    practiceDate: date,
+    sentenceStart: null,
+    sentenceEnd: null,
+    wordStart: null,
+    wordEnd: null,
+    sentenceCount: Math.max(0, value.sentences - pending.sentences),
+    wordCount: Math.max(0, value.words - pending.words),
+    attempts: Math.max(0, value.sessions - pending.sessions),
+    correctIndexes: [],
+    missedIndexes: [],
+    accuracy: null,
+    transcript: "",
+    createdAt: `${date}T00:00:00.000Z`,
+  };
+  }).filter((session) => session.sentenceCount || session.wordCount || session.attempts);
+  if (legacySessions.length) {
+    const { error } = await state.cloudClient
+      .from(SUPABASE_SESSIONS_TABLE)
+      .upsert(legacySessions.map(sessionToCloudRow), { onConflict: "user_id,id", ignoreDuplicates: true });
+    if (error) throw error;
+    state.cloudSessions = normalizeCloudSessions([...state.cloudSessions, ...legacySessions]);
+  }
+  localStorage.setItem(CLOUD_V2_MIGRATED_KEY, "1");
+  await pushCloudData(false);
+}
+
+function loadPendingSessions() {
+  try {
+    return normalizeCloudSessions(JSON.parse(localStorage.getItem(PENDING_SESSIONS_KEY) || "[]"));
+  } catch {
+    return [];
+  }
+}
+
+function persistPendingSessions() {
+  localStorage.setItem(PENDING_SESSIONS_KEY, JSON.stringify(state.pendingSessions));
+}
+
+function queuePracticeSession(activeRange) {
+  const sentenceRange = activeRange ? activeSentenceRange(activeRange) : null;
+  const comparison = state.comparison;
+  const session = {
+    id: window.crypto?.randomUUID?.() || `session-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    articleKey: state.articleKey || "",
+    practiceDate: localDateKey(),
+    sentenceStart: sentenceRange?.start ?? null,
+    sentenceEnd: sentenceRange?.end ?? null,
+    wordStart: activeRange?.start ?? null,
+    wordEnd: activeRange?.end ?? null,
+    sentenceCount: sentenceRange ? sentenceRange.end - sentenceRange.start + 1 : 0,
+    wordCount: activeRange ? Math.max(0, activeRange.end - activeRange.start) : 0,
+    attempts: 1,
+    correctIndexes: comparison ? [...comparison.correctExpectedIndexes] : [],
+    missedIndexes: comparison ? [...comparison.missedExpectedIndexes] : [],
+    accuracy: comparison?.accuracy ?? null,
+    transcript: `${state.finalTranscript} ${state.interimTranscript}`.trim(),
+    createdAt: new Date().toISOString(),
+  };
+  state.pendingSessions = normalizeCloudSessions([...state.pendingSessions, session]);
+  state.cloudSessions = normalizeCloudSessions([...state.cloudSessions, session]);
+  persistPendingSessions();
+  flushPendingSessions();
+}
+
+async function flushPendingSessions() {
+  if (!state.cloudV2Ready || !state.cloudClient || !state.cloudSession?.user || !state.pendingSessions.length) return;
+  const pending = [...state.pendingSessions];
+  const { error } = await state.cloudClient
+    .from(SUPABASE_SESSIONS_TABLE)
+    .upsert(pending.map(sessionToCloudRow), { onConflict: "user_id,id", ignoreDuplicates: true });
+  if (error) {
+    setCloudStatus(`背诵记录等待联网同步：${cloudErrorMessage(error)}`);
+    return;
+  }
+  const sentIds = new Set(pending.map((item) => item.id));
+  state.pendingSessions = state.pendingSessions.filter((item) => !sentIds.has(item.id));
+  persistPendingSessions();
+}
+
+function rebuildDailyStatsFromSessions() {
+  if (!state.cloudV2Ready) return;
+  const stats = {};
+  normalizeCloudSessions([...state.cloudSessions, ...state.pendingSessions]).forEach((session) => {
+    const current = stats[session.practiceDate] || { sentences: 0, sessions: 0, words: 0 };
+    stats[session.practiceDate] = {
+      sentences: current.sentences + session.sentenceCount,
+      sessions: current.sessions + session.attempts,
+      words: current.words + session.wordCount,
+    };
+  });
+  state.dailyStats = stats;
+  localStorage.setItem(DAILY_STATS_KEY, JSON.stringify(stats));
+  renderDailyStats();
+}
+
+function restoreCurrentArticleFromLibrary() {
+  if (!state.articles.length) return;
+  const localCurrent = state.articles.find((item) => item.articleKey === state.articleKey);
+  const newest = state.articles[0];
+  const current = !localCurrent || String(newest.lastOpenedAt) > String(localCurrent.lastOpenedAt)
+    ? newest
+    : localCurrent;
+  const sessions = state.cloudSessions.filter((item) => item.articleKey === current.articleKey);
+  state.articleProgress[current.articleKey] = progressFromArticleSessions(current, sessions);
+  localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+  els.pasteBox.value = current.content;
+  parseArticle(current.content, { title: current.title, sourceUrl: current.sourceUrl, persist: true, status: false });
+}
+
+function progressFromArticleSessions(article, sessions) {
+  const reciteCounts = normalizeCountArray(article.baselineReciteCounts);
+  const wordHistory = normalizeWordHistory(article.baselineWordHistory);
+  sessions.forEach((session) => {
+    if (session.sentenceStart && session.sentenceEnd) {
+      for (let number = session.sentenceStart; number <= session.sentenceEnd; number += 1) {
+        reciteCounts[number - 1] = safeStatCount(reciteCounts[number - 1]) + 1;
+      }
+    }
+    session.correctIndexes.forEach((index) => {
+      const item = wordHistory[index] || { correct: 0, missed: 0 };
+      item.correct = safeStatCount(item.correct) + 1;
+      wordHistory[index] = item;
+    });
+    session.missedIndexes.forEach((index) => {
+      const item = wordHistory[index] || { correct: 0, missed: 0 };
+      item.missed = safeStatCount(item.missed) + 1;
+      wordHistory[index] = item;
+    });
+  });
+  return { reciteCounts, wordHistory, updatedAt: new Date().toISOString() };
+}
+
+async function deleteArticleEverywhere(articleKey) {
+  state.articles = state.articles.filter((item) => item.articleKey !== articleKey);
+  delete state.articleProgress[articleKey];
+  state.cloudSessions = state.cloudSessions.filter((item) => item.articleKey !== articleKey);
+  state.pendingSessions = state.pendingSessions.filter((item) => item.articleKey !== articleKey);
+  persistArticleLibrary();
+  persistPendingSessions();
+  localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
+  if (state.cloudV2Ready && state.cloudSession?.user) {
+    await Promise.all([
+      state.cloudClient.from(SUPABASE_SESSIONS_TABLE).delete()
+        .eq("user_id", state.cloudSession.user.id).eq("article_key", articleKey),
+      state.cloudClient.from(SUPABASE_ARTICLES_TABLE).delete()
+        .eq("user_id", state.cloudSession.user.id).eq("article_key", articleKey),
+    ]);
+  }
+  if (state.articleKey === articleKey) resetAll();
+  rebuildDailyStatsFromSessions();
+  savePracticeBackup();
+  await pushCloudData(false);
+  renderArticleLibrary();
+  setImportStatus("文章及其云端背诵记录已删除。");
+}
+
+function isCloudV2Missing(error) {
+  return /reciter_articles|reciter_sessions|schema cache|does not exist/i.test(error?.message || "");
+}
+
 function limitArticleProgress(progress) {
   return Object.fromEntries(Object.entries(normalizeArticleProgress(progress))
-    .sort((left, right) => String(right[1].updatedAt).localeCompare(String(left[1].updatedAt)))
-    .slice(0, 20));
+    .sort((left, right) => String(right[1].updatedAt).localeCompare(String(left[1].updatedAt))));
 }
 
 function saveDailyStats() {
@@ -1868,11 +2359,15 @@ function saveDailyStatsStartDate() {
 }
 
 function canSyncDailyStatsToServer() {
-  return (window.location.protocol === "http:" || window.location.protocol === "https:") && !isStaticPublicHost();
+  return isLoopbackHost();
 }
 
 function isStaticPublicHost() {
   return /(?:^|\.)(github\.io|pages\.dev|netlify\.app|vercel\.app)$/i.test(window.location.hostname);
+}
+
+function isLoopbackHost() {
+  return /^(?:127\.0\.0\.1|localhost|\[::1\])$/.test(window.location.hostname);
 }
 
 function scheduleDailyStatsServerSave() {
@@ -2234,6 +2729,7 @@ function resetAll() {
   state.reciteCounts = [];
   state.wordHistory = [];
   state.articleKey = "";
+  state.currentArticleMeta = null;
   state.comparison = null;
   state.finalTranscript = "";
   state.interimTranscript = "";
@@ -2254,12 +2750,15 @@ function resetAll() {
   setImportStatus("");
   setRecordStatus("");
   renderArticle();
+  renderArticleLibrary();
   syncFloatingControls();
 }
 
 state.articleProgress = loadArticleProgress();
 state.urlHistory = loadUrlHistory();
 state.dailyStats = loadDailyStats();
+state.articles = loadArticleLibrary();
+state.pendingSessions = loadPendingSessions();
 state.dailyStatsStartDate = loadDailyStatsStartDate();
 state.selectedDailyStatsDate = localDateKey();
 pruneDailyStats();
@@ -2268,10 +2767,11 @@ localStorage.setItem(DAILY_STATS_START_KEY, state.dailyStatsStartDate);
 savePracticeBackup();
 renderDailyStats();
 renderUrlHistory();
+renderArticleLibrary();
 const savedArticleText = localStorage.getItem(CURRENT_ARTICLE_TEXT_KEY);
 if (savedArticleText) {
   els.pasteBox.value = savedArticleText;
-  parseArticle(savedArticleText, { persist: false, status: false });
+  parseArticle(savedArticleText, { persist: true, status: false, preserveTimestamps: true });
   setImportStatus("已恢复上次导入的文章和累计纠错记录。");
 } else {
   renderArticle();
@@ -2282,3 +2782,13 @@ initCloudSync();
 populateDeviceOptions();
 syncFloatingControls();
 window.addEventListener("pagehide", savePracticeBackup);
+window.addEventListener("online", async () => {
+  await flushPendingSessions();
+  await syncCloudV2();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && state.cloudSession?.user) syncCloudV2();
+});
+if ("serviceWorker" in navigator && !isLoopbackHost()) {
+  navigator.serviceWorker.register("./service-worker.js").catch(() => {});
+}

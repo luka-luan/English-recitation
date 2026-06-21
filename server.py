@@ -7,26 +7,52 @@ import shutil
 import subprocess
 import tempfile
 import argparse
+import time
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 ROOT = Path(__file__).resolve().parent
 MAX_BODY_BYTES = 2 * 1024 * 1024
 YTDLP_TIMEOUT_SECONDS = 90
 STATE_PATH = ROOT / ".data" / "reciter-state.json"
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "https://owwvxgqiarhqmepajorf.supabase.co").rstrip("/")
+SUPABASE_PUBLISHABLE_KEY = os.environ.get("SUPABASE_PUBLISHABLE_KEY", "sb_publishable_q-HR6ZeIAZBzYPOvRkfmmw_TSjMw8ev")
+REQUIRE_API_AUTH = os.environ.get("RENDER", "").lower() in {"1", "true", "yes"}
+ALLOWED_ORIGINS = {
+    "https://luka-luan.github.io",
+    "https://english-recitation.onrender.com",
+}
+RATE_LIMIT_WINDOW_SECONDS = 10 * 60
+RATE_LIMIT_REQUESTS = 12
+RATE_LIMITS = {}
 
 
 class ReciterHandler(SimpleHTTPRequestHandler):
     def translate_path(self, path):
         parsed = urlparse(path)
         clean_path = unquote(parsed.path).lstrip("/") or "index.html"
-        return str((ROOT / clean_path).resolve())
+        target = (ROOT / clean_path).resolve()
+        if ROOT not in target.parents and target != ROOT:
+            return str(ROOT / "index.html")
+        return str(target)
+
+    def do_OPTIONS(self):
+        if urlparse(self.path).path.startswith("/api/"):
+            self.send_response(204)
+            self.end_headers()
+            return
+        self.send_error(404, "Not found")
 
     def do_POST(self):
         api_path = urlparse(self.path).path
         if api_path == "/api/state":
+            if REQUIRE_API_AUTH:
+                self.send_error(404, "Not found")
+                return
             try:
                 payload = self.read_json_body()
                 state = sanitize_state(payload)
@@ -41,6 +67,12 @@ class ReciterHandler(SimpleHTTPRequestHandler):
             return
 
         try:
+            if REQUIRE_API_AUTH and not self.is_authenticated():
+                self.write_json(401, {"ok": False, "message": "请先登录云同步，再使用公网字幕提取。"})
+                return
+            if not self.consume_rate_limit():
+                self.write_json(429, {"ok": False, "message": "字幕请求过于频繁，请十分钟后再试。"})
+                return
             payload = self.read_json_body()
             url = payload.get("url", "").strip()
             if not is_supported_url(url):
@@ -73,11 +105,51 @@ class ReciterHandler(SimpleHTTPRequestHandler):
         if not self.path.startswith("/api/"):
             self.send_header("cache-control", "no-store, max-age=0")
         if self.path.startswith("/api/"):
-            self.send_header("access-control-allow-origin", "http://127.0.0.1:4173")
+            origin = self.headers.get("origin", "")
+            if is_allowed_origin(origin):
+                self.send_header("access-control-allow-origin", origin)
+            self.send_header("access-control-allow-methods", "GET, POST, OPTIONS")
+            self.send_header("access-control-allow-headers", "Authorization, Content-Type")
+            self.send_header("vary", "Origin")
         super().end_headers()
+
+    def is_authenticated(self):
+        authorization = self.headers.get("authorization", "")
+        if not authorization.lower().startswith("bearer "):
+            return False
+        token = authorization.split(" ", 1)[1].strip()
+        if not token:
+            return False
+        request = Request(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "apikey": SUPABASE_PUBLISHABLE_KEY,
+                "authorization": f"Bearer {token}",
+            },
+        )
+        try:
+            with urlopen(request, timeout=8) as response:
+                return response.status == 200
+        except (HTTPError, URLError, TimeoutError):
+            return False
+
+    def consume_rate_limit(self):
+        forwarded = self.headers.get("x-forwarded-for", "")
+        client = forwarded.split(",", 1)[0].strip() or self.client_address[0]
+        now = time.monotonic()
+        attempts = [stamp for stamp in RATE_LIMITS.get(client, []) if now - stamp < RATE_LIMIT_WINDOW_SECONDS]
+        if len(attempts) >= RATE_LIMIT_REQUESTS:
+            RATE_LIMITS[client] = attempts
+            return False
+        attempts.append(now)
+        RATE_LIMITS[client] = attempts
+        return True
 
     def do_GET(self):
         if urlparse(self.path).path == "/api/state":
+            if REQUIRE_API_AUTH:
+                self.send_error(404, "Not found")
+                return
             self.write_json(200, {"ok": True, **load_state()})
             return
         super().do_GET()
@@ -91,7 +163,21 @@ class SubtitleError(Exception):
 
 def is_supported_url(url):
     parsed = urlparse(url)
-    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+    host = (parsed.hostname or "").lower()
+    allowed_hosts = {
+        "youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be",
+        "bilibili.com", "www.bilibili.com", "m.bilibili.com", "b23.tv",
+    }
+    return parsed.scheme in {"http", "https"} and host in allowed_hosts
+
+
+def is_allowed_origin(origin):
+    if not origin:
+        return False
+    if origin in ALLOWED_ORIGINS:
+        return True
+    parsed = urlparse(origin)
+    return parsed.scheme in {"http", "https"} and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
 
 
 def sanitize_state(payload):
@@ -232,6 +318,7 @@ def extract_subtitles(url):
             "--ignore-config",
             "--no-playlist",
             "--skip-download",
+            "--no-simulate",
             "--write-subs",
             "--write-auto-subs",
             "--sub-langs",
@@ -240,6 +327,8 @@ def extract_subtitles(url):
             "vtt/srt/best",
             "--convert-subs",
             "srt",
+            "--print",
+            "RECITER_TITLE:%(title)s",
             "--output",
             output_template,
             url,
@@ -263,8 +352,12 @@ def extract_subtitles(url):
 
         selected = choose_subtitle(subtitle_files)
         text = selected.read_text(encoding="utf-8", errors="ignore")
+        title_line = next((line for line in completed.stdout.splitlines() if line.startswith("RECITER_TITLE:")), "")
+        title = title_line.removeprefix("RECITER_TITLE:").strip() or selected.stem
         return {
             "text": text,
+            "title": title,
+            "source_url": url,
             "track": selected.name,
             "tracks": [path.name for path in subtitle_files],
         }
