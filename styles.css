@@ -52,6 +52,7 @@ button,
 input[type="url"],
 input[type="email"],
 input[type="search"],
+.cloud-otp,
 select,
 textarea {
   border: 1px solid var(--line);
@@ -71,6 +72,7 @@ textarea {
 input[type="url"],
 input[type="email"],
 input[type="search"],
+.cloud-otp,
 select {
   min-height: 34px;
   padding: 0 10px;
@@ -87,6 +89,7 @@ textarea {
 input[type="url"]:focus,
 input[type="email"]:focus,
 input[type="search"]:focus,
+.cloud-otp:focus,
 select:focus,
 textarea:focus {
   background: #ffffff;
@@ -241,6 +244,32 @@ h2 {
 .cloud-auth {
   display: grid;
   gap: 8px;
+}
+
+.cloud-step {
+  display: grid;
+  gap: 8px;
+}
+
+.cloud-step[hidden] {
+  display: none;
+}
+
+#cloudOtpStep {
+  grid-template-columns: 1fr 1fr;
+}
+
+#cloudOtpStep .cloud-otp {
+  grid-column: 1 / -1;
+  min-height: 42px;
+  text-align: center;
+  font-size: 1.25rem;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+#cloudOtpStep button {
+  min-width: 0;
 }
 
 .cloud-auth[hidden] {

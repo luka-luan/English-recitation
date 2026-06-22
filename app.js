@@ -54,12 +54,13 @@ const PRACTICE_BACKUP_KEY = "english-reciter-practice-backup-v1";
 const ARTICLE_LIBRARY_KEY = "english-reciter-article-library-v2";
 const PENDING_SESSIONS_KEY = "english-reciter-pending-sessions-v2";
 const CLOUD_V2_MIGRATED_KEY = "english-reciter-cloud-v2-migrated";
+const CLOUD_OTP_EMAIL_KEY = "english-reciter-cloud-otp-email";
+const CLOUD_OTP_SENT_AT_KEY = "english-reciter-cloud-otp-sent-at";
 let dailyStatsSaveTimer = 0;
 let cloudSaveTimer = 0;
 let cloudArticleSaveTimer = 0;
 let queuedArticleSave = null;
-let cloudLoginPollTimer = 0;
-let cloudLoginPollTimeout = 0;
+let cloudOtpCountdownTimer = 0;
 
 const els = {
   fileInput: document.querySelector("#fileInput"),
@@ -108,6 +109,12 @@ const els = {
   cloudSignedIn: document.querySelector("#cloudSignedIn"),
   cloudEmail: document.querySelector("#cloudEmail"),
   cloudLoginBtn: document.querySelector("#cloudLoginBtn"),
+  cloudEmailStep: document.querySelector("#cloudEmailStep"),
+  cloudOtpStep: document.querySelector("#cloudOtpStep"),
+  cloudOtp: document.querySelector("#cloudOtp"),
+  cloudVerifyBtn: document.querySelector("#cloudVerifyBtn"),
+  cloudResendBtn: document.querySelector("#cloudResendBtn"),
+  cloudChangeEmailBtn: document.querySelector("#cloudChangeEmailBtn"),
   cloudPullBtn: document.querySelector("#cloudPullBtn"),
   cloudPushBtn: document.querySelector("#cloudPushBtn"),
   cloudLogoutBtn: document.querySelector("#cloudLogoutBtn"),
@@ -139,10 +146,17 @@ els.floatingCameraBtn.addEventListener("click", toggleFloatingCamera);
 els.floatingRecordBtn.addEventListener("click", startRecitation);
 els.floatingStopBtn.addEventListener("click", stopRecitation);
 els.floatingExportBtn.addEventListener("click", exportPracticeData);
-els.cloudLoginBtn.addEventListener("click", sendCloudLoginLink);
+els.cloudLoginBtn.addEventListener("click", () => sendCloudOtp());
 els.cloudEmail.addEventListener("keydown", (event) => {
-  if (event.key === "Enter") sendCloudLoginLink();
+  if (event.key === "Enter") sendCloudOtp();
 });
+els.cloudOtp.addEventListener("input", handleCloudOtpInput);
+els.cloudOtp.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") verifyCloudOtp();
+});
+els.cloudVerifyBtn.addEventListener("click", verifyCloudOtp);
+els.cloudResendBtn.addEventListener("click", () => sendCloudOtp({ resend: true }));
+els.cloudChangeEmailBtn.addEventListener("click", () => clearCloudOtpState());
 els.cloudPullBtn.addEventListener("click", pullCloudData);
 els.cloudPushBtn.addEventListener("click", () => pushCloudData(true));
 els.cloudLogoutBtn.addEventListener("click", signOutCloud);
@@ -1849,6 +1863,7 @@ async function initCloudSync() {
     const { data, error } = await state.cloudClient.auth.getSession();
     if (error) throw error;
     await applyCloudSession(data.session);
+    if (!data.session) restoreCloudOtpState();
 
     state.cloudClient.auth.onAuthStateChange(async (_event, session) => {
       await applyCloudSession(session);
@@ -1869,56 +1884,164 @@ async function applyCloudSession(session) {
     return;
   }
 
-  stopCloudLoginPolling();
+  clearCloudOtpState({ keepEmail: true, keepStatus: true });
 
   setCloudStatus("已登录，正在合并云端数据...");
   await pullCloudData({ silentWhenEmpty: true });
   await syncCloudV2();
 }
 
-async function sendCloudLoginLink() {
+async function sendCloudOtp(options = {}) {
   if (!state.cloudClient) {
     setCloudStatus("云同步还没有准备好，请稍后再试。");
     return;
   }
 
-  const email = els.cloudEmail.value.trim();
+  const email = (options.resend ? getPendingCloudEmail() : els.cloudEmail.value).trim();
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
     setCloudStatus("请先输入邮箱。");
     return;
   }
 
   els.cloudLoginBtn.disabled = true;
-  setCloudStatus("正在发送登录链接...");
+  els.cloudResendBtn.disabled = true;
+  setCloudStatus(options.resend ? "正在重新发送验证码..." : "正在发送验证码...");
   try {
     const { error } = await state.cloudClient.auth.signInWithOtp({
       email,
-      options: { emailRedirectTo: cloudRedirectUrl() },
+      options: { shouldCreateUser: true },
     });
     if (error) throw error;
-    setCloudStatus("登录链接已发送。邮箱确认后，这个页面会自动登录。");
-    startCloudLoginPolling();
+    setPendingCloudOtp(email);
+    showCloudOtpStep(email);
+    startCloudOtpCountdown();
+    setCloudStatus(`验证码已发送到 ${email}，请在原页面输入六位数字。`);
   } catch (error) {
-    setCloudStatus(`发送失败：${cloudErrorMessage(error)}`);
+    setCloudStatus(`发送失败：${cloudOtpErrorMessage(error)}`);
   } finally {
     els.cloudLoginBtn.disabled = false;
+    updateCloudOtpCountdown();
   }
 }
 
-function startCloudLoginPolling() {
-  stopCloudLoginPolling();
-  cloudLoginPollTimer = window.setInterval(refreshCloudSession, 1500);
-  cloudLoginPollTimeout = window.setTimeout(() => {
-    stopCloudLoginPolling();
-    if (!state.cloudSession) setCloudStatus("登录链接仍未确认，可以重新发送一封。");
-  }, 10 * 60 * 1000);
+function handleCloudOtpInput() {
+  const digits = els.cloudOtp.value.replace(/\D/g, "").slice(0, 6);
+  if (els.cloudOtp.value !== digits) els.cloudOtp.value = digits;
+  els.cloudVerifyBtn.disabled = digits.length !== 6;
 }
 
-function stopCloudLoginPolling() {
-  if (cloudLoginPollTimer) window.clearInterval(cloudLoginPollTimer);
-  if (cloudLoginPollTimeout) window.clearTimeout(cloudLoginPollTimeout);
-  cloudLoginPollTimer = 0;
-  cloudLoginPollTimeout = 0;
+async function verifyCloudOtp() {
+  if (!state.cloudClient) return;
+  const email = getPendingCloudEmail();
+  const token = els.cloudOtp.value.replace(/\D/g, "").slice(0, 6);
+  if (!email) {
+    clearCloudOtpState();
+    setCloudStatus("请先填写邮箱并发送验证码。");
+    return;
+  }
+  if (token.length !== 6) {
+    setCloudStatus("请输入邮件中的六位验证码。");
+    return;
+  }
+
+  els.cloudVerifyBtn.disabled = true;
+  setCloudStatus("正在验证...");
+  try {
+    const { data, error } = await state.cloudClient.auth.verifyOtp({ email, token, type: "email" });
+    if (error) throw error;
+    if (!data?.session) throw new Error("没有获得登录会话");
+    clearCloudOtpState({ keepEmail: true, keepStatus: true });
+    if (data.session.access_token !== state.cloudSession?.access_token) await applyCloudSession(data.session);
+    setCloudStatus("验证码正确，已在当前页面登录并同步。");
+  } catch (error) {
+    els.cloudVerifyBtn.disabled = false;
+    setCloudStatus(`验证失败：${cloudOtpErrorMessage(error)}`);
+  }
+}
+
+function setPendingCloudOtp(email) {
+  try {
+    sessionStorage.setItem(CLOUD_OTP_EMAIL_KEY, email);
+    sessionStorage.setItem(CLOUD_OTP_SENT_AT_KEY, String(Date.now()));
+  } catch {
+    // The form still works if sessionStorage is unavailable.
+  }
+}
+
+function getPendingCloudEmail() {
+  try {
+    return sessionStorage.getItem(CLOUD_OTP_EMAIL_KEY) || els.cloudEmail.value.trim();
+  } catch {
+    return els.cloudEmail.value.trim();
+  }
+}
+
+function getCloudOtpSentAt() {
+  try {
+    return Number(sessionStorage.getItem(CLOUD_OTP_SENT_AT_KEY) || 0);
+  } catch {
+    return 0;
+  }
+}
+
+function showCloudOtpStep(email) {
+  els.cloudEmail.value = email;
+  els.cloudEmailStep.hidden = true;
+  els.cloudOtpStep.hidden = false;
+  els.cloudOtp.value = "";
+  els.cloudVerifyBtn.disabled = true;
+  window.setTimeout(() => els.cloudOtp.focus(), 0);
+}
+
+function clearCloudOtpState(options = {}) {
+  window.clearInterval(cloudOtpCountdownTimer);
+  cloudOtpCountdownTimer = 0;
+  try {
+    sessionStorage.removeItem(CLOUD_OTP_EMAIL_KEY);
+    sessionStorage.removeItem(CLOUD_OTP_SENT_AT_KEY);
+  } catch {
+    // Ignore storage restrictions.
+  }
+  els.cloudOtp.value = "";
+  els.cloudOtpStep.hidden = true;
+  els.cloudEmailStep.hidden = false;
+  els.cloudVerifyBtn.disabled = true;
+  els.cloudResendBtn.disabled = false;
+  els.cloudResendBtn.textContent = "重新发送";
+  if (!options.keepEmail) els.cloudEmail.value = "";
+  if (!options.keepStatus && !state.cloudSession) setCloudStatus("未登录云同步。本地数据仍会正常保存。");
+}
+
+function restoreCloudOtpState() {
+  const email = getPendingCloudEmail();
+  const sentAt = getCloudOtpSentAt();
+  if (!email || !sentAt || Date.now() - sentAt > 10 * 60 * 1000) return;
+  showCloudOtpStep(email);
+  startCloudOtpCountdown();
+  setCloudStatus(`等待输入发送到 ${email} 的六位验证码。`);
+}
+
+function startCloudOtpCountdown() {
+  window.clearInterval(cloudOtpCountdownTimer);
+  updateCloudOtpCountdown();
+  cloudOtpCountdownTimer = window.setInterval(updateCloudOtpCountdown, 1000);
+}
+
+function updateCloudOtpCountdown() {
+  const remaining = Math.max(0, 60 - Math.floor((Date.now() - getCloudOtpSentAt()) / 1000));
+  els.cloudResendBtn.disabled = remaining > 0;
+  els.cloudResendBtn.textContent = remaining > 0 ? `重新发送（${remaining}）` : "重新发送";
+  if (!remaining && cloudOtpCountdownTimer) {
+    window.clearInterval(cloudOtpCountdownTimer);
+    cloudOtpCountdownTimer = 0;
+  }
+}
+
+function cloudOtpErrorMessage(error) {
+  const message = error?.message || String(error || "未知错误");
+  if (/expired|invalid.*otp|token.*invalid/i.test(message)) return "验证码错误或已过期，请重新发送。";
+  if (/rate limit|too many|security purposes/i.test(message)) return "发送太频繁，请稍后再试。";
+  return cloudErrorMessage(error);
 }
 
 async function refreshCloudSession() {
@@ -2024,10 +2147,6 @@ function updateCloudUi() {
 
 function setCloudStatus(message) {
   els.cloudStatus.textContent = message;
-}
-
-function cloudRedirectUrl() {
-  return `${window.location.origin}${window.location.pathname}`;
 }
 
 function formatCloudTime(value) {

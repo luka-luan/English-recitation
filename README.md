@@ -37,6 +37,8 @@ https://english-recitation.onrender.com/**
 http://127.0.0.1:4173/**
 ```
 
+登录使用六位邮箱验证码。在 Supabase Authentication → Email Templates 中，把 **Magic Link** 和 **Confirm signup** 模板都替换为 [`supabase-email-otp-template.html`](./supabase-email-otp-template.html) 的内容。模板必须包含 `{{ .Token }}`，不要保留 `{{ .ConfirmationURL }}`，否则邮件仍会发送跳转链接。
+
 手机可以把 GitHub Pages 页面“添加到主屏幕”，安装后名称显示为“英语背诵”。
 
 如果要保留完整后端功能，可以部署到 Render：
