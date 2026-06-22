@@ -58,6 +58,8 @@ let dailyStatsSaveTimer = 0;
 let cloudSaveTimer = 0;
 let cloudArticleSaveTimer = 0;
 let queuedArticleSave = null;
+let cloudLoginPollTimer = 0;
+let cloudLoginPollTimeout = 0;
 
 const els = {
   fileInput: document.querySelector("#fileInput"),
@@ -1867,6 +1869,8 @@ async function applyCloudSession(session) {
     return;
   }
 
+  stopCloudLoginPolling();
+
   setCloudStatus("已登录，正在合并云端数据...");
   await pullCloudData({ silentWhenEmpty: true });
   await syncCloudV2();
@@ -1892,11 +1896,42 @@ async function sendCloudLoginLink() {
       options: { emailRedirectTo: cloudRedirectUrl() },
     });
     if (error) throw error;
-    setCloudStatus("登录链接已发送，请去邮箱点击链接。");
+    setCloudStatus("登录链接已发送。邮箱确认后，这个页面会自动登录。");
+    startCloudLoginPolling();
   } catch (error) {
     setCloudStatus(`发送失败：${cloudErrorMessage(error)}`);
   } finally {
     els.cloudLoginBtn.disabled = false;
+  }
+}
+
+function startCloudLoginPolling() {
+  stopCloudLoginPolling();
+  cloudLoginPollTimer = window.setInterval(refreshCloudSession, 1500);
+  cloudLoginPollTimeout = window.setTimeout(() => {
+    stopCloudLoginPolling();
+    if (!state.cloudSession) setCloudStatus("登录链接仍未确认，可以重新发送一封。");
+  }, 10 * 60 * 1000);
+}
+
+function stopCloudLoginPolling() {
+  if (cloudLoginPollTimer) window.clearInterval(cloudLoginPollTimer);
+  if (cloudLoginPollTimeout) window.clearTimeout(cloudLoginPollTimeout);
+  cloudLoginPollTimer = 0;
+  cloudLoginPollTimeout = 0;
+}
+
+async function refreshCloudSession() {
+  if (!state.cloudClient) return;
+  try {
+    const { data, error } = await state.cloudClient.auth.getSession();
+    if (error) return;
+    const session = data?.session || null;
+    if (!session || session.access_token === state.cloudSession?.access_token) return;
+    await applyCloudSession(session);
+    setCloudStatus("邮箱确认成功，原页面已自动登录并同步。");
+  } catch {
+    // Keep waiting for the auth session to appear in this browser.
   }
 }
 
@@ -2810,6 +2845,10 @@ window.addEventListener("pagehide", savePracticeBackup);
 window.addEventListener("online", async () => {
   await flushPendingSessions();
   await syncCloudV2();
+});
+window.addEventListener("focus", refreshCloudSession);
+window.addEventListener("storage", (event) => {
+  if (event.key?.startsWith("sb-")) refreshCloudSession();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible" && state.cloudSession?.user) syncCloudV2();
