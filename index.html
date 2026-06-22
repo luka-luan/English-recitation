@@ -94,9 +94,9 @@
                   inputmode="numeric"
                   autocomplete="one-time-code"
                   pattern="[0-9]*"
-                  maxlength="6"
-                  placeholder="输入 6 位验证码"
-                  aria-label="六位邮箱验证码"
+                  maxlength="10"
+                  placeholder="输入邮箱验证码"
+                  aria-label="邮箱验证码"
                 />
                 <button id="cloudVerifyBtn" class="primary" type="button" disabled>确认登录</button>
                 <button id="cloudResendBtn" type="button">重新发送</button>
@@ -188,6 +188,6 @@
     </div>
     <video id="cameraPreview" playsinline muted></video>
 
-    <script type="module" src="./app.js?v=20260622-email-otp"></script>
+    <script type="module" src="./app.js?v=20260622-otp-length"></script>
   </body>
 </html>

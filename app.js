@@ -1915,7 +1915,7 @@ async function sendCloudOtp(options = {}) {
     setPendingCloudOtp(email);
     showCloudOtpStep(email);
     startCloudOtpCountdown();
-    setCloudStatus(`验证码已发送到 ${email}，请在原页面输入六位数字。`);
+    setCloudStatus(`验证码已发送到 ${email}，请在原页面输入邮件中的数字。`);
   } catch (error) {
     setCloudStatus(`发送失败：${cloudOtpErrorMessage(error)}`);
   } finally {
@@ -1925,22 +1925,22 @@ async function sendCloudOtp(options = {}) {
 }
 
 function handleCloudOtpInput() {
-  const digits = els.cloudOtp.value.replace(/\D/g, "").slice(0, 6);
+  const digits = els.cloudOtp.value.replace(/\D/g, "").slice(0, 10);
   if (els.cloudOtp.value !== digits) els.cloudOtp.value = digits;
-  els.cloudVerifyBtn.disabled = digits.length !== 6;
+  els.cloudVerifyBtn.disabled = digits.length < 6;
 }
 
 async function verifyCloudOtp() {
   if (!state.cloudClient) return;
   const email = getPendingCloudEmail();
-  const token = els.cloudOtp.value.replace(/\D/g, "").slice(0, 6);
+  const token = els.cloudOtp.value.replace(/\D/g, "").slice(0, 10);
   if (!email) {
     clearCloudOtpState();
     setCloudStatus("请先填写邮箱并发送验证码。");
     return;
   }
-  if (token.length !== 6) {
-    setCloudStatus("请输入邮件中的六位验证码。");
+  if (token.length < 6) {
+    setCloudStatus("请输入邮件中的完整验证码。");
     return;
   }
 
@@ -2018,7 +2018,7 @@ function restoreCloudOtpState() {
   if (!email || !sentAt || Date.now() - sentAt > 10 * 60 * 1000) return;
   showCloudOtpStep(email);
   startCloudOtpCountdown();
-  setCloudStatus(`等待输入发送到 ${email} 的六位验证码。`);
+  setCloudStatus(`等待输入发送到 ${email} 的邮箱验证码。`);
 }
 
 function startCloudOtpCountdown() {
