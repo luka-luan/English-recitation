@@ -31,6 +31,9 @@ const state = {
   currentSessionCounted: false,
   replayHighlightSentence: 0,
   replayAutoScrollAt: 0,
+  replayCues: [],
+  recordingStartedAt: 0,
+  replayAudioPrimeTimers: [],
   urlHistory: [],
   cloudClient: null,
   cloudSession: null,
@@ -148,11 +151,12 @@ els.refreshDevicesBtn.addEventListener("click", populateDeviceOptions);
 els.scoreManualBtn.addEventListener("click", scoreManualTranscript);
 els.cameraPreview.addEventListener("pointerdown", startCameraDrag);
 els.replayVideo.addEventListener("pointerdown", startReplayDrag);
-els.replayVideo.addEventListener("play", () => resetReplayAudioState());
+els.replayVideo.addEventListener("play", primeReplayAudioOnPlay);
 els.replayVideo.addEventListener("play", updateReplayHighlight);
 els.replayVideo.addEventListener("timeupdate", updateReplayHighlight);
 els.replayVideo.addEventListener("seeked", updateReplayHighlight);
 els.replayVideo.addEventListener("ended", clearReplayHighlight);
+els.replayVideo.addEventListener("ended", clearReplayAudioPrimeTimers);
 els.replayBackBtn.addEventListener("click", skipReplayBack);
 els.deleteReplayBtn.addEventListener("click", () => clearReplayRecording({ status: "已删除当前录像。" }));
 els.floatingJumpBtn.addEventListener("click", jumpToRecognizedRange);
@@ -1077,6 +1081,8 @@ function startRecitation() {
   state.pendingStatsRange = null;
   state.currentSessionCounted = false;
   clearReplayHighlight();
+  state.replayCues = [];
+  state.recordingStartedAt = 0;
   state.recognitionRestarting = false;
   state.recognitionRestartCount = 0;
   state.lastRecognitionAt = Date.now();
@@ -1114,6 +1120,7 @@ function startRecitation() {
   } catch {
     state.mediaRecorder.start();
   }
+  state.recordingStartedAt = performance.now();
 
   startSpeechRecognition();
   startRecognitionWatchdog();
@@ -1263,6 +1270,7 @@ function startSpeechRecognition() {
     state.interimTranscript = interimText;
     updateLiveTranscript();
     compareTranscript(false);
+    captureReplayCue();
   });
 
   recognition.addEventListener("speechstart", markRecognitionActive);
@@ -1562,9 +1570,7 @@ function updateReplayHighlight() {
     return;
   }
 
-  const sentenceCount = Math.max(1, sentenceRange.end - sentenceRange.start + 1);
-  const progress = Math.min(0.999, Math.max(0, els.replayVideo.currentTime / els.replayVideo.duration));
-  const sentence = Math.min(sentenceRange.end, sentenceRange.start + Math.floor(progress * sentenceCount));
+  const sentence = replaySentenceForTime(els.replayVideo.currentTime, sentenceRange);
   if (sentence === state.replayHighlightSentence) {
     maybeScrollReplayHighlight(sentence);
     return;
@@ -1592,6 +1598,37 @@ function clearReplayHighlight() {
   document.querySelectorAll(".sentence-card.replay-current").forEach((card) => {
     card.classList.remove("replay-current");
   });
+}
+
+function captureReplayCue() {
+  if (!state.isRecording || !state.recordingStartedAt || !state.comparison?.activeRange) return;
+  const sentenceRange = activeSentenceRange(state.comparison.activeRange);
+  if (!sentenceRange) return;
+  const sentence = sentenceRange.end;
+  const time = Math.max(0, (performance.now() - state.recordingStartedAt) / 1000);
+  const lastCue = state.replayCues[state.replayCues.length - 1];
+  if (lastCue && lastCue.sentence === sentence && time - lastCue.time < 0.8) return;
+  if (lastCue && time < lastCue.time) return;
+  state.replayCues.push({ time, sentence });
+}
+
+function replaySentenceForTime(currentTime, sentenceRange) {
+  const cues = state.replayCues
+    .filter((cue) => cue.sentence >= sentenceRange.start && cue.sentence <= sentenceRange.end)
+    .sort((left, right) => left.time - right.time);
+
+  if (cues.length) {
+    let current = sentenceRange.start;
+    for (const cue of cues) {
+      if (cue.time > currentTime + 0.25) break;
+      current = cue.sentence;
+    }
+    return Math.min(sentenceRange.end, Math.max(sentenceRange.start, current));
+  }
+
+  const sentenceCount = Math.max(1, sentenceRange.end - sentenceRange.start + 1);
+  const progress = Math.min(0.999, Math.max(0, currentTime / els.replayVideo.duration));
+  return Math.min(sentenceRange.end, sentenceRange.start + Math.floor(progress * sentenceCount));
 }
 
 function incrementReciteCounts(activeRange) {
@@ -3052,6 +3089,20 @@ function resetReplayAudioState() {
   }
 }
 
+function primeReplayAudioOnPlay() {
+  resetReplayAudioState();
+  primeReplayAudioForSafari();
+  if (!isAppleMobileSafari()) return;
+
+  clearReplayAudioPrimeTimers();
+  [350, 1200, 3000, 7000].forEach((delay) => {
+    const timer = window.setTimeout(() => {
+      if (!els.replayVideo.paused && !els.replayVideo.ended) primeReplayAudioForSafari();
+    }, delay);
+    state.replayAudioPrimeTimers.push(timer);
+  });
+}
+
 function primeReplayAudioForSafari() {
   if (!isAppleMobileSafari() || !state.recordingUrl) return;
 
@@ -3074,6 +3125,11 @@ function primeReplayAudioForSafari() {
   });
 }
 
+function clearReplayAudioPrimeTimers() {
+  state.replayAudioPrimeTimers.forEach((timer) => window.clearTimeout(timer));
+  state.replayAudioPrimeTimers = [];
+}
+
 function isAppleMobileSafari() {
   const ua = navigator.userAgent || "";
   const isAppleMobile = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -3083,6 +3139,9 @@ function isAppleMobileSafari() {
 
 function clearReplayRecording({ status = "" } = {}) {
   clearReplayHighlight();
+  clearReplayAudioPrimeTimers();
+  state.replayCues = [];
+  state.recordingStartedAt = 0;
   if (state.recordingUrl) URL.revokeObjectURL(state.recordingUrl);
   state.recordingUrl = "";
   state.recordingMimeType = "";
