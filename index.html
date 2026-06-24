@@ -162,10 +162,9 @@
     </main>
     <section class="floating-controls" aria-label="常用背诵控制">
       <div class="floating-mode-controls" role="group" aria-label="隐藏选项">
-        <button data-floating-hide-mode="none" class="active">全显</button>
-        <button data-floating-hide-mode="zh">隐中文</button>
-        <button data-floating-hide-mode="hint2">前两词</button>
-        <button data-floating-hide-mode="en">全隐</button>
+        <button id="toggleEnglishBtn" type="button">隐英文</button>
+        <button id="toggleChineseBtn" type="button">隐中文</button>
+        <button id="hintTwoBtn" type="button">前两词</button>
       </div>
       <button id="floatingHintBtn">提示</button>
       <span id="floatingHintText" class="floating-hint-text">根据背诵位置提示</span>
@@ -189,6 +188,6 @@
     </div>
     <video id="cameraPreview" playsinline muted></video>
 
-    <script type="module" src="./app.js?v=20260624-ipad-replay"></script>
+    <script type="module" src="./app.js?v=20260624-toggle-display"></script>
   </body>
 </html>

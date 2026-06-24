@@ -1,6 +1,8 @@
 const state = {
   sentences: [],
   hideMode: "none",
+  englishHidden: false,
+  chineseHidden: false,
   mediaStream: null,
   mediaRecorder: null,
   recordedChunks: [],
@@ -102,6 +104,9 @@ const els = {
   floatingJumpBtn: document.querySelector("#floatingJumpBtn"),
   floatingHintBtn: document.querySelector("#floatingHintBtn"),
   floatingHintText: document.querySelector("#floatingHintText"),
+  toggleEnglishBtn: document.querySelector("#toggleEnglishBtn"),
+  toggleChineseBtn: document.querySelector("#toggleChineseBtn"),
+  hintTwoBtn: document.querySelector("#hintTwoBtn"),
   floatingCameraBtn: document.querySelector("#floatingCameraBtn"),
   floatingRecordBtn: document.querySelector("#floatingRecordBtn"),
   floatingStopBtn: document.querySelector("#floatingStopBtn"),
@@ -174,20 +179,60 @@ document.querySelectorAll("[data-hide-mode]").forEach((button) => {
   button.addEventListener("click", () => setHideMode(button.dataset.hideMode));
 });
 
-document.querySelectorAll("[data-floating-hide-mode]").forEach((button) => {
-  button.addEventListener("click", () => setHideMode(button.dataset.floatingHideMode));
-});
+els.toggleEnglishBtn.addEventListener("click", toggleEnglishVisibility);
+els.toggleChineseBtn.addEventListener("click", toggleChineseVisibility);
+els.hintTwoBtn.addEventListener("click", toggleHintTwoMode);
 
 function setHideMode(mode) {
   state.hideMode = mode;
+  state.englishHidden = mode === "en";
+  state.chineseHidden = mode === "zh";
   document.querySelectorAll("[data-hide-mode]").forEach((button) => {
     button.classList.toggle("active", button.dataset.hideMode === mode);
   });
-  document.querySelectorAll("[data-floating-hide-mode]").forEach((button) => {
-    button.classList.toggle("active", button.dataset.floatingHideMode === mode);
-  });
+  syncDisplayToggleButtons();
   renderArticle();
   syncFloatingControls();
+}
+
+function toggleEnglishVisibility() {
+  if (state.hideMode === "hint2") state.hideMode = "none";
+  state.englishHidden = !state.englishHidden;
+  syncHideModeFromToggles();
+}
+
+function toggleChineseVisibility() {
+  if (state.hideMode === "hint2") state.hideMode = "none";
+  state.chineseHidden = !state.chineseHidden;
+  syncHideModeFromToggles();
+}
+
+function toggleHintTwoMode() {
+  if (state.hideMode === "hint2") {
+    state.hideMode = "none";
+    state.englishHidden = false;
+  } else {
+    state.hideMode = "hint2";
+    state.englishHidden = false;
+  }
+  syncDisplayToggleButtons();
+  renderArticle();
+  syncFloatingControls();
+}
+
+function syncHideModeFromToggles() {
+  state.hideMode = state.englishHidden ? "en" : state.chineseHidden ? "zh" : "none";
+  syncDisplayToggleButtons();
+  renderArticle();
+  syncFloatingControls();
+}
+
+function syncDisplayToggleButtons() {
+  els.toggleEnglishBtn.textContent = state.englishHidden ? "显英文" : "隐英文";
+  els.toggleChineseBtn.textContent = state.chineseHidden ? "显中文" : "隐中文";
+  els.hintTwoBtn.classList.toggle("active", state.hideMode === "hint2");
+  els.toggleEnglishBtn.classList.toggle("active", state.englishHidden);
+  els.toggleChineseBtn.classList.toggle("active", state.chineseHidden);
 }
 
 function toggleFloatingCamera() {
@@ -198,6 +243,7 @@ function toggleFloatingCamera() {
 function syncFloatingControls() {
   const hasArticle = Boolean(state.sentences.length);
   const hasCamera = Boolean(state.mediaStream);
+  syncDisplayToggleButtons();
   els.floatingCameraBtn.textContent = hasCamera ? "关摄像头" : "开摄像头";
   els.floatingCameraBtn.disabled = state.isRecording;
   els.floatingRecordBtn.disabled = !hasArticle || !hasCamera || state.isRecording;
@@ -749,7 +795,7 @@ function renderArticle() {
     translation.dataset.role = "translation";
     translation.textContent = sentence.zh || "";
     translation.hidden = !sentence.zh;
-    translation.classList.toggle("hidden-text", state.hideMode === "zh");
+    translation.classList.toggle("hidden-text", state.chineseHidden);
 
     body.append(english, translation);
     card.append(number, body);
@@ -791,7 +837,7 @@ function renderEnglishSentence(text, sentenceIndex) {
 }
 
 function shouldHideToken(wordOrder, type) {
-  if (state.hideMode === "en") return true;
+  if (state.englishHidden) return true;
   if (state.hideMode !== "hint2") return false;
   if (type === "word") return wordOrder > 2;
   return wordOrder >= 2;
