@@ -146,6 +146,7 @@ els.refreshDevicesBtn.addEventListener("click", populateDeviceOptions);
 els.scoreManualBtn.addEventListener("click", scoreManualTranscript);
 els.cameraPreview.addEventListener("pointerdown", startCameraDrag);
 els.replayVideo.addEventListener("pointerdown", startReplayDrag);
+els.replayVideo.addEventListener("play", () => resetReplayAudioState());
 els.replayBackBtn.addEventListener("click", skipReplayBack);
 els.deleteReplayBtn.addEventListener("click", () => clearReplayRecording({ status: "已删除当前录像。" }));
 els.floatingJumpBtn.addEventListener("click", jumpToRecognizedRange);
@@ -1206,6 +1207,8 @@ async function finishRecording() {
 
   try {
     await loadReplayVideo(url);
+    resetReplayAudioState();
+    primeReplayAudioForSafari();
     els.replayDock.hidden = false;
   } catch {
     clearReplayRecording();
@@ -2989,6 +2992,39 @@ function recordingFileExtension(mimeType) {
   return /mp4/i.test(mimeType || "") ? "mp4" : "webm";
 }
 
+function resetReplayAudioState() {
+  try {
+    els.replayVideo.muted = false;
+    els.replayVideo.volume = 1;
+    els.replayVideo.defaultPlaybackRate = 1;
+    els.replayVideo.playbackRate = 1;
+  } catch {
+    // Some iPadOS media properties are restricted; keep playback available.
+  }
+}
+
+function primeReplayAudioForSafari() {
+  if (!isAppleMobileSafari() || !state.recordingUrl) return;
+
+  const currentTime = Number.isFinite(els.replayVideo.currentTime) ? els.replayVideo.currentTime : 0;
+  resetReplayAudioState();
+  try {
+    els.replayVideo.playbackRate = 1.01;
+  } catch {
+    return;
+  }
+  window.requestAnimationFrame(() => {
+    resetReplayAudioState();
+    if (Number.isFinite(currentTime) && currentTime > 0) {
+      try {
+        els.replayVideo.currentTime = Math.min(currentTime, els.replayVideo.duration || currentTime);
+      } catch {
+        // iPad Safari can reject seeking while metadata is still settling.
+      }
+    }
+  });
+}
+
 function isAppleMobileSafari() {
   const ua = navigator.userAgent || "";
   const isAppleMobile = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
@@ -3033,6 +3069,7 @@ function loadReplayVideo(url) {
     els.replayVideo.pause();
     els.replayVideo.removeAttribute("src");
     els.replayVideo.load();
+    resetReplayAudioState();
     els.replayVideo.addEventListener("loadedmetadata", handleReady);
     els.replayVideo.addEventListener("canplay", handleReady);
     els.replayVideo.addEventListener("error", handleError);
