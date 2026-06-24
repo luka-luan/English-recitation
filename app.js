@@ -64,11 +64,16 @@ const PENDING_SESSIONS_KEY = "english-reciter-pending-sessions-v2";
 const CLOUD_V2_MIGRATED_KEY = "english-reciter-cloud-v2-migrated";
 const CLOUD_OTP_EMAIL_KEY = "english-reciter-cloud-otp-email";
 const CLOUD_OTP_SENT_AT_KEY = "english-reciter-cloud-otp-sent-at";
+const MAX_LOCAL_ARTICLES = 60;
+const MAX_REPLAY_CUES = 500;
+const LIVE_COMPARE_INTERVAL_MS = 1200;
+const MAX_TRANSCRIPT_CHARS = 24000;
 let dailyStatsSaveTimer = 0;
 let cloudSaveTimer = 0;
 let cloudArticleSaveTimer = 0;
 let queuedArticleSave = null;
 let cloudOtpCountdownTimer = 0;
+let liveCompareTimer = 0;
 
 const els = {
   fileInput: document.querySelector("#fileInput"),
@@ -522,7 +527,9 @@ function normalizeArticleLibrary(source) {
     const current = unique.get(normalized.articleKey);
     if (!current || normalized.updatedAt >= current.updatedAt) unique.set(normalized.articleKey, normalized);
   });
-  return [...unique.values()].sort((a, b) => b.lastOpenedAt.localeCompare(a.lastOpenedAt));
+  return [...unique.values()]
+    .sort((a, b) => b.lastOpenedAt.localeCompare(a.lastOpenedAt))
+    .slice(0, MAX_LOCAL_ARTICLES);
 }
 
 function loadArticleLibrary() {
@@ -535,7 +542,16 @@ function loadArticleLibrary() {
 
 function persistArticleLibrary() {
   state.articles = normalizeArticleLibrary(state.articles);
-  localStorage.setItem(ARTICLE_LIBRARY_KEY, JSON.stringify(state.articles));
+  try {
+    localStorage.setItem(ARTICLE_LIBRARY_KEY, JSON.stringify(state.articles));
+  } catch {
+    state.articles = state.articles.slice(0, Math.max(20, Math.floor(MAX_LOCAL_ARTICLES / 2)));
+    try {
+      localStorage.setItem(ARTICLE_LIBRARY_KEY, JSON.stringify(state.articles));
+    } catch {
+      // Keep the in-memory library for this session if the device storage quota is full.
+    }
+  }
 }
 
 function saveCurrentArticleToLibrary() {
@@ -1131,6 +1147,7 @@ function startRecitation() {
 function stopRecitation() {
   state.pendingStatsRange = state.comparison?.activeRange || state.lastRecognizedRange || null;
   state.isRecording = false;
+  clearLiveCompareTimer();
   stopRecognitionWatchdog();
   if (state.mediaRecorder?.state === "recording") {
     try {
@@ -1268,9 +1285,9 @@ function startSpeechRecognition() {
 
     state.finalTranscript += finalText;
     state.interimTranscript = interimText;
+    trimLiveTranscript();
     updateLiveTranscript();
-    compareTranscript(false);
-    captureReplayCue();
+    scheduleLiveCompare();
   });
 
   recognition.addEventListener("speechstart", markRecognitionActive);
@@ -1352,6 +1369,27 @@ function updateLiveTranscript() {
   const text = `${state.finalTranscript} ${state.interimTranscript}`.trim();
   els.liveTranscript.textContent = text || "正在等待声音。";
   if (!els.floatingResult.hidden) els.floatingTranscript.textContent = text || "暂无转写。";
+}
+
+function trimLiveTranscript() {
+  if (state.finalTranscript.length <= MAX_TRANSCRIPT_CHARS) return;
+  state.finalTranscript = state.finalTranscript.slice(-MAX_TRANSCRIPT_CHARS).replace(/^\S+\s*/, "");
+}
+
+function scheduleLiveCompare() {
+  if (liveCompareTimer) return;
+  liveCompareTimer = window.setTimeout(() => {
+    liveCompareTimer = 0;
+    if (!state.isRecording) return;
+    compareTranscript(false);
+    captureReplayCue();
+  }, LIVE_COMPARE_INTERVAL_MS);
+}
+
+function clearLiveCompareTimer() {
+  if (!liveCompareTimer) return;
+  window.clearTimeout(liveCompareTimer);
+  liveCompareTimer = 0;
 }
 
 function compareTranscript(showResult = true) {
@@ -1610,6 +1648,9 @@ function captureReplayCue() {
   if (lastCue && lastCue.sentence === sentence && time - lastCue.time < 0.8) return;
   if (lastCue && time < lastCue.time) return;
   state.replayCues.push({ time, sentence });
+  if (state.replayCues.length > MAX_REPLAY_CUES) {
+    state.replayCues = state.replayCues.filter((_, index) => index % 2 === 0);
+  }
 }
 
 function replaySentenceForTime(currentTime, sentenceRange) {
@@ -1922,7 +1963,11 @@ function practiceDataPayload(options = {}) {
 }
 
 function savePracticeBackup() {
-  localStorage.setItem(PRACTICE_BACKUP_KEY, JSON.stringify(practiceDataPayload({ includeLibrary: true })));
+  try {
+    localStorage.setItem(PRACTICE_BACKUP_KEY, JSON.stringify(practiceDataPayload({ includeLibrary: false })));
+  } catch {
+    // The primary structured stores above remain authoritative; skip the duplicate safety backup if storage is full.
+  }
   scheduleCloudSave();
 }
 
@@ -3138,6 +3183,7 @@ function isAppleMobileSafari() {
 }
 
 function clearReplayRecording({ status = "" } = {}) {
+  clearLiveCompareTimer();
   clearReplayHighlight();
   clearReplayAudioPrimeTimers();
   state.replayCues = [];
