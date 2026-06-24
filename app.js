@@ -29,6 +29,8 @@ const state = {
   lastRecognizedRange: null,
   pendingStatsRange: null,
   currentSessionCounted: false,
+  replayHighlightSentence: 0,
+  replayAutoScrollAt: 0,
   urlHistory: [],
   cloudClient: null,
   cloudSession: null,
@@ -147,6 +149,10 @@ els.scoreManualBtn.addEventListener("click", scoreManualTranscript);
 els.cameraPreview.addEventListener("pointerdown", startCameraDrag);
 els.replayVideo.addEventListener("pointerdown", startReplayDrag);
 els.replayVideo.addEventListener("play", () => resetReplayAudioState());
+els.replayVideo.addEventListener("play", updateReplayHighlight);
+els.replayVideo.addEventListener("timeupdate", updateReplayHighlight);
+els.replayVideo.addEventListener("seeked", updateReplayHighlight);
+els.replayVideo.addEventListener("ended", clearReplayHighlight);
 els.replayBackBtn.addEventListener("click", skipReplayBack);
 els.deleteReplayBtn.addEventListener("click", () => clearReplayRecording({ status: "已删除当前录像。" }));
 els.floatingJumpBtn.addEventListener("click", jumpToRecognizedRange);
@@ -771,6 +777,7 @@ function renderArticle() {
     const card = document.createElement("article");
     card.className = "sentence-card";
     card.id = `sentence-${index + 1}`;
+    card.classList.toggle("replay-current", state.replayHighlightSentence === index + 1);
 
     const number = document.createElement("span");
     number.className = "sentence-index";
@@ -1069,6 +1076,7 @@ function startRecitation() {
   state.lastRecognizedRange = null;
   state.pendingStatsRange = null;
   state.currentSessionCounted = false;
+  clearReplayHighlight();
   state.recognitionRestarting = false;
   state.recognitionRestartCount = 0;
   state.lastRecognitionAt = Date.now();
@@ -1210,6 +1218,7 @@ async function finishRecording() {
     resetReplayAudioState();
     primeReplayAudioForSafari();
     els.replayDock.hidden = false;
+    updateReplayHighlight();
   } catch {
     clearReplayRecording();
     setRecordStatus("本次录像生成失败，请重新录制。");
@@ -1392,6 +1401,7 @@ function compareTranscript(showResult = true) {
 
   if (showResult) {
     renderResult();
+    updateReplayHighlight();
     const rangeLabel = sentenceRangeLabel(activeRange);
     const statsText = dailyStatsStatusText(stats);
     setRecordStatus(`评分完成：${accuracy}% 准确率。${rangeLabel}${statsText}绿色是背对的词，红色是这一段里漏掉或顺序不对的词。`);
@@ -1543,6 +1553,45 @@ function showFloatingResult(sentenceRange, totalSentences) {
   els.floatingJumpBtn.dataset.sentence = String(sentenceRange.start);
   els.floatingJumpBtn.hidden = false;
   els.floatingResult.hidden = false;
+}
+
+function updateReplayHighlight() {
+  const sentenceRange = state.comparison?.activeRange ? activeSentenceRange(state.comparison.activeRange) : null;
+  if (!sentenceRange || !state.recordingUrl || !Number.isFinite(els.replayVideo.duration) || els.replayVideo.duration <= 0) {
+    clearReplayHighlight();
+    return;
+  }
+
+  const sentenceCount = Math.max(1, sentenceRange.end - sentenceRange.start + 1);
+  const progress = Math.min(0.999, Math.max(0, els.replayVideo.currentTime / els.replayVideo.duration));
+  const sentence = Math.min(sentenceRange.end, sentenceRange.start + Math.floor(progress * sentenceCount));
+  if (sentence === state.replayHighlightSentence) {
+    maybeScrollReplayHighlight(sentence);
+    return;
+  }
+
+  state.replayHighlightSentence = sentence;
+  document.querySelectorAll(".sentence-card.replay-current").forEach((card) => {
+    card.classList.remove("replay-current");
+  });
+  document.querySelector(`#sentence-${sentence}`)?.classList.add("replay-current");
+  maybeScrollReplayHighlight(sentence);
+}
+
+function maybeScrollReplayHighlight(sentence) {
+  if (els.replayVideo.paused || els.replayVideo.ended) return;
+  const now = Date.now();
+  if (now - state.replayAutoScrollAt < 1800) return;
+  state.replayAutoScrollAt = now;
+  document.querySelector(`#sentence-${sentence}`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function clearReplayHighlight() {
+  state.replayHighlightSentence = 0;
+  state.replayAutoScrollAt = 0;
+  document.querySelectorAll(".sentence-card.replay-current").forEach((card) => {
+    card.classList.remove("replay-current");
+  });
 }
 
 function incrementReciteCounts(activeRange) {
@@ -3033,6 +3082,7 @@ function isAppleMobileSafari() {
 }
 
 function clearReplayRecording({ status = "" } = {}) {
+  clearReplayHighlight();
   if (state.recordingUrl) URL.revokeObjectURL(state.recordingUrl);
   state.recordingUrl = "";
   state.recordingMimeType = "";
