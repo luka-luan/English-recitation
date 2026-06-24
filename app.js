@@ -106,6 +106,7 @@ const els = {
   replayDock: document.querySelector("#replayDock"),
   replayVideo: document.querySelector("#replayVideo"),
   replayBackBtn: document.querySelector("#replayBackBtn"),
+  openReplayBtn: document.querySelector("#openReplayBtn"),
   deleteReplayBtn: document.querySelector("#deleteReplayBtn"),
   floatingResult: document.querySelector("#floatingResult"),
   floatingRange: document.querySelector("#floatingRange"),
@@ -158,11 +159,15 @@ els.cameraPreview.addEventListener("pointerdown", startCameraDrag);
 els.replayVideo.addEventListener("pointerdown", startReplayDrag);
 els.replayVideo.addEventListener("play", primeReplayAudioOnPlay);
 els.replayVideo.addEventListener("play", updateReplayHighlight);
+els.replayVideo.addEventListener("pause", updateReplayHighlight);
+els.replayVideo.addEventListener("loadedmetadata", updateReplayHighlight);
+els.replayVideo.addEventListener("durationchange", updateReplayHighlight);
 els.replayVideo.addEventListener("timeupdate", updateReplayHighlight);
 els.replayVideo.addEventListener("seeked", updateReplayHighlight);
-els.replayVideo.addEventListener("ended", clearReplayHighlight);
+els.replayVideo.addEventListener("ended", updateReplayHighlight);
 els.replayVideo.addEventListener("ended", clearReplayAudioPrimeTimers);
 els.replayBackBtn.addEventListener("click", skipReplayBack);
+els.openReplayBtn.addEventListener("click", openReplayInSystemPlayer);
 els.deleteReplayBtn.addEventListener("click", () => clearReplayRecording({ status: "已删除当前录像。" }));
 els.floatingJumpBtn.addEventListener("click", jumpToRecognizedRange);
 els.floatingHintBtn.addEventListener("click", showNextWordHint);
@@ -1254,6 +1259,18 @@ function skipReplayBack() {
   els.replayVideo.currentTime = Math.max(0, els.replayVideo.currentTime - 5);
 }
 
+function openReplayInSystemPlayer() {
+  if (!state.recordingUrl) {
+    setRecordStatus("当前没有可播放的录像。");
+    return;
+  }
+  const link = document.createElement("a");
+  link.href = state.recordingUrl;
+  link.target = "_blank";
+  link.rel = "noopener";
+  link.click();
+}
+
 function startSpeechRecognition() {
   const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!Recognition) {
@@ -1603,10 +1620,11 @@ function showFloatingResult(sentenceRange, totalSentences) {
 
 function updateReplayHighlight() {
   const sentenceRange = state.comparison?.activeRange ? activeSentenceRange(state.comparison.activeRange) : null;
-  if (!sentenceRange || !state.recordingUrl || !Number.isFinite(els.replayVideo.duration) || els.replayVideo.duration <= 0) {
+  if (!sentenceRange || !state.recordingUrl) {
     clearReplayHighlight();
     return;
   }
+  if (!Number.isFinite(els.replayVideo.duration) || els.replayVideo.duration <= 0) return;
 
   const sentence = replaySentenceForTime(els.replayVideo.currentTime, sentenceRange);
   if (sentence === state.replayHighlightSentence) {

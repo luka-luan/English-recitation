@@ -985,7 +985,22 @@ body.camera-active #cameraPreview {
   backdrop-filter: blur(12px);
 }
 
+.replay-open {
+  position: absolute;
+  left: 50%;
+  top: 10px;
+  transform: translateX(-50%);
+  min-height: 30px;
+  border-color: rgba(255, 255, 255, 0.5);
+  background: rgba(29, 29, 31, 0.68);
+  color: white;
+  padding: 0 10px;
+  font-size: 0.82rem;
+  backdrop-filter: blur(12px);
+}
+
 .replay-back:hover,
+.replay-open:hover,
 .replay-delete:hover {
   border-color: rgba(255, 255, 255, 0.88);
   background: rgba(29, 29, 31, 0.82);
