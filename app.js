@@ -4,6 +4,7 @@ const state = {
   mediaStream: null,
   mediaRecorder: null,
   recordedChunks: [],
+  recordingMimeType: "",
   recognition: null,
   recognitionWatchdog: null,
   recognitionRestarting: false,
@@ -93,6 +94,7 @@ const els = {
   replayDock: document.querySelector("#replayDock"),
   replayVideo: document.querySelector("#replayVideo"),
   replayBackBtn: document.querySelector("#replayBackBtn"),
+  deleteReplayBtn: document.querySelector("#deleteReplayBtn"),
   floatingResult: document.querySelector("#floatingResult"),
   floatingRange: document.querySelector("#floatingRange"),
   floatingMeta: document.querySelector("#floatingMeta"),
@@ -140,6 +142,7 @@ els.scoreManualBtn.addEventListener("click", scoreManualTranscript);
 els.cameraPreview.addEventListener("pointerdown", startCameraDrag);
 els.replayVideo.addEventListener("pointerdown", startReplayDrag);
 els.replayBackBtn.addEventListener("click", skipReplayBack);
+els.deleteReplayBtn.addEventListener("click", () => clearReplayRecording({ status: "已删除当前录像。" }));
 els.floatingJumpBtn.addEventListener("click", jumpToRecognizedRange);
 els.floatingHintBtn.addEventListener("click", showNextWordHint);
 els.floatingCameraBtn.addEventListener("click", toggleFloatingCamera);
@@ -1023,19 +1026,39 @@ function startRecitation() {
   state.recognitionRestartCount = 0;
   state.lastRecognitionAt = Date.now();
   state.isRecording = true;
+  clearReplayRecording();
   renderArticle();
-  els.downloadLink.hidden = true;
   els.floatingResult.hidden = true;
-  els.replayDock.hidden = true;
   setNextHintText("开始背后，可点击提示。");
 
+  if (!window.MediaRecorder) {
+    state.isRecording = false;
+    setRecordStatus("当前浏览器不支持录像 API。请升级 iPadOS，或换 Chrome、Edge、Safari 后重试。");
+    syncFloatingControls();
+    return;
+  }
+
   const mimeType = getSupportedMimeType();
-  state.mediaRecorder = new MediaRecorder(state.mediaStream, mimeType ? { mimeType } : undefined);
+  try {
+    state.mediaRecorder = new MediaRecorder(state.mediaStream, mimeType ? { mimeType } : undefined);
+  } catch (error) {
+    state.isRecording = false;
+    state.mediaRecorder = null;
+    setRecordStatus(`当前浏览器无法创建录像：${error.name || "未知错误"}。请换 Safari/Chrome 或重启浏览器后重试。`);
+    syncFloatingControls();
+    return;
+  }
+
+  state.recordingMimeType = state.mediaRecorder.mimeType || mimeType || "";
   state.mediaRecorder.addEventListener("dataavailable", (event) => {
     if (event.data.size > 0) state.recordedChunks.push(event.data);
   });
-  state.mediaRecorder.addEventListener("stop", finishRecording);
-  state.mediaRecorder.start();
+  state.mediaRecorder.addEventListener("stop", finishRecording, { once: true });
+  try {
+    state.mediaRecorder.start(1000);
+  } catch {
+    state.mediaRecorder.start();
+  }
 
   startSpeechRecognition();
   startRecognitionWatchdog();
@@ -1047,7 +1070,14 @@ function stopRecitation() {
   state.pendingStatsRange = state.comparison?.activeRange || state.lastRecognizedRange || null;
   state.isRecording = false;
   stopRecognitionWatchdog();
-  if (state.mediaRecorder?.state === "recording") state.mediaRecorder.stop();
+  if (state.mediaRecorder?.state === "recording") {
+    try {
+      state.mediaRecorder.requestData();
+    } catch {
+      // Safari may not support requestData in every recording state.
+    }
+    state.mediaRecorder.stop();
+  }
   stopSpeechRecognition();
   stopMediaStream();
   syncFloatingControls();
@@ -1109,17 +1139,32 @@ function placeFloatingElement(element, left, top) {
   element.style.bottom = "auto";
 }
 
-function finishRecording() {
-  const blob = new Blob(state.recordedChunks, { type: state.mediaRecorder?.mimeType || "video/webm" });
-  if (state.recordingUrl) URL.revokeObjectURL(state.recordingUrl);
+async function finishRecording() {
+  const blobType = state.mediaRecorder?.mimeType || state.recordingMimeType || getRecordingFallbackMimeType();
+  const blob = new Blob(state.recordedChunks, { type: blobType });
+  state.mediaRecorder = null;
+
+  if (!blob.size) {
+    clearReplayRecording();
+    setRecordStatus("本次录像没有生成有效视频，请重新录制。");
+    return;
+  }
+
   const url = URL.createObjectURL(blob);
   state.recordingUrl = url;
+  state.recordingMimeType = blob.type || blobType;
   els.downloadLink.href = url;
-  els.downloadLink.download = `recitation-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.webm`;
+  els.downloadLink.download = `recitation-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${recordingFileExtension(blob.type || blobType)}`;
   els.downloadLink.hidden = false;
   els.downloadLink.textContent = "下载录像";
-  els.replayVideo.src = url;
-  els.replayDock.hidden = false;
+
+  try {
+    await loadReplayVideo(url);
+    els.replayDock.hidden = false;
+  } catch {
+    clearReplayRecording();
+    setRecordStatus("本次录像生成失败，请重新录制。");
+  }
 }
 
 function skipReplayBack() {
@@ -2878,8 +2923,76 @@ function expandContraction(word) {
 }
 
 function getSupportedMimeType() {
-  const types = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
-  return types.find((type) => MediaRecorder.isTypeSupported(type));
+  if (!window.MediaRecorder?.isTypeSupported) return "";
+
+  const safariTypes = [
+    "video/mp4;codecs=h264,aac",
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+    "video/mp4",
+  ];
+  const webTypes = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
+  const types = isAppleMobileSafari() ? [...safariTypes, ...webTypes] : [...webTypes, ...safariTypes];
+  return types.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+}
+
+function getRecordingFallbackMimeType() {
+  return isAppleMobileSafari() ? "video/mp4" : "video/webm";
+}
+
+function recordingFileExtension(mimeType) {
+  return /mp4/i.test(mimeType || "") ? "mp4" : "webm";
+}
+
+function isAppleMobileSafari() {
+  const ua = navigator.userAgent || "";
+  const isAppleMobile = /iPad|iPhone|iPod/.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  const isSafari = /Safari/i.test(ua) && !/CriOS|FxiOS|EdgiOS/i.test(ua);
+  return isAppleMobile && isSafari;
+}
+
+function clearReplayRecording({ status = "" } = {}) {
+  if (state.recordingUrl) URL.revokeObjectURL(state.recordingUrl);
+  state.recordingUrl = "";
+  state.recordingMimeType = "";
+  state.recordedChunks = [];
+  els.replayVideo.pause();
+  els.replayVideo.removeAttribute("src");
+  els.replayVideo.load();
+  els.replayDock.hidden = true;
+  els.downloadLink.removeAttribute("href");
+  els.downloadLink.removeAttribute("download");
+  els.downloadLink.hidden = true;
+  if (status) setRecordStatus(status);
+}
+
+function loadReplayVideo(url) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      els.replayVideo.removeEventListener("loadedmetadata", handleReady);
+      els.replayVideo.removeEventListener("canplay", handleReady);
+      els.replayVideo.removeEventListener("error", handleError);
+    };
+    const finish = (callback) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const handleReady = () => finish(resolve);
+    const handleError = () => finish(reject);
+    const timer = window.setTimeout(handleError, 6000);
+
+    els.replayVideo.pause();
+    els.replayVideo.removeAttribute("src");
+    els.replayVideo.load();
+    els.replayVideo.addEventListener("loadedmetadata", handleReady);
+    els.replayVideo.addEventListener("canplay", handleReady);
+    els.replayVideo.addEventListener("error", handleError);
+    els.replayVideo.src = url;
+    els.replayVideo.load();
+  });
 }
 
 function setImportStatus(message) {
@@ -2902,8 +3015,7 @@ function escapeHtml(text) {
 
 function resetAll() {
   stopMediaStream();
-  if (state.recordingUrl) URL.revokeObjectURL(state.recordingUrl);
-  state.recordingUrl = "";
+  clearReplayRecording();
   state.sentences = [];
   state.reciteCounts = [];
   state.wordHistory = [];
@@ -2920,9 +3032,6 @@ function resetAll() {
   els.fileInput.value = "";
   els.liveTranscript.textContent = "等待开始背诵。";
   setNextHintText("根据背诵位置提示");
-  els.replayVideo.removeAttribute("src");
-  els.replayVideo.load();
-  els.replayDock.hidden = true;
   els.floatingResult.hidden = true;
   els.floatingTranscript.textContent = "暂无转写。";
   els.floatingJumpBtn.hidden = false;
