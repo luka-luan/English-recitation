@@ -16,6 +16,7 @@ const state = {
   finalTranscript: "",
   interimTranscript: "",
   comparison: null,
+  lastComparison: null,
   reciteCounts: [],
   wordHistory: [],
   articleKey: "",
@@ -782,6 +783,9 @@ function normalizeWhitespace(text) {
   return text.replace(/\s+/g, " ").trim();
 }
 
+const WORD_OR_NUMBER_REGEX = /[A-Za-z]+(?:'[A-Za-z]+)?|\d+(?:[,.]\d+)*/g;
+const TOKEN_OR_SPACE_REGEX = /[A-Za-z]+(?:'[A-Za-z]+)?|\d+(?:[,.]\d+)*(?:\.\d+)?|\s+|[^A-Za-z\d\s]+/g;
+
 function renderArticle() {
   if (!state.sentences.length) {
     els.articleList.className = "article-list empty";
@@ -843,6 +847,7 @@ function renderArticle() {
 
 function renderEnglishSentence(text, sentenceIndex) {
   const tokenRecords = tokenizeExpectedSentence(text, sentenceIndex);
+  const visibleComparison = displayComparison();
   let surfaceWordOrder = 0;
 
   return tokenRecords
@@ -854,8 +859,8 @@ function renderEnglishSentence(text, sentenceIndex) {
       }
 
       surfaceWordOrder += 1;
-      const wordState = state.comparison ? comparisonStateForWord(record.wordIndexes) : "";
-      const history = cumulativeWordInfo(record.wordIndexes);
+      const wordState = visibleComparison ? comparisonStateForWord(record.wordIndexes, visibleComparison) : "";
+      const history = visibleComparison ? null : cumulativeWordInfo(record.wordIndexes);
       const classes = ["word"];
       const attrs = [`data-word-order="${surfaceWordOrder}"`];
       if (history) {
@@ -877,12 +882,21 @@ function shouldHideToken(wordOrder, type) {
   return wordOrder >= 2;
 }
 
-function comparisonStateForWord(wordIndexes) {
-  const range = state.comparison?.activeRange;
+function displayComparison() {
+  return state.comparison || state.lastComparison || null;
+}
+
+function comparisonStateForWord(wordIndexes, comparison) {
+  const range = comparison?.activeRange;
   if (range && wordIndexes.every((wordIndex) => wordIndex < range.start || wordIndex >= range.end)) return "";
-  if (wordIndexes.every((wordIndex) => state.comparison.correctExpectedIndexes.has(wordIndex))) return "correct";
-  if (wordIndexes.some((wordIndex) => state.comparison.missedExpectedIndexes?.has(wordIndex))) return "missed";
+  if (wordIndexes.every((wordIndex) => hasIndex(comparison.correctExpectedIndexes, wordIndex))) return "correct";
+  if (wordIndexes.some((wordIndex) => hasIndex(comparison.missedExpectedIndexes, wordIndex))) return "missed";
   return "";
+}
+
+function hasIndex(collection, index) {
+  if (!collection) return false;
+  return collection instanceof Set ? collection.has(index) : collection.includes(index);
 }
 
 function cumulativeWordInfo(wordIndexes) {
@@ -910,17 +924,16 @@ function cumulativeWordInfo(wordIndexes) {
 
 function tokenizeExpectedSentence(text, sentenceIndex) {
   const records = [];
-  const regex = /[A-Za-z]+(?:'[A-Za-z]+)?|\s+|[^A-Za-z\s]+/g;
   let match;
   let localWordIndex = 0;
   const offset = state.sentences.slice(0, sentenceIndex).reduce((sum, item) => sum + wordsFromText(item.english).length, 0);
 
-  while ((match = regex.exec(text))) {
+  while ((match = TOKEN_OR_SPACE_REGEX.exec(text))) {
     const value = match[0];
     if (/^\s+$/.test(value)) {
       records.push({ type: "space", value });
-    } else if (/^[A-Za-z]/.test(value)) {
-      const normalizedWords = expandContraction(value.toLowerCase());
+    } else if (isScoredToken(value)) {
+      const normalizedWords = scoredTokenWords(value);
       records.push({
         type: "word",
         value,
@@ -1737,6 +1750,7 @@ function updateWordHistory(comparison) {
   const range = comparison?.activeRange;
   if (!range) return;
   ensureWordHistoryLength();
+  state.lastComparison = normalizeLastComparison(comparison);
 
   for (let index = range.start; index < range.end; index += 1) {
     const item = state.wordHistory[index] || { correct: 0, missed: 0 };
@@ -1932,6 +1946,7 @@ function normalizeArticleProgress(source) {
     .map(([key, value]) => [key, {
       reciteCounts: normalizeCountArray(value.reciteCounts),
       wordHistory: normalizeWordHistory(value.wordHistory),
+      lastComparison: normalizeLastComparison(value.lastComparison),
       updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
     }]));
 }
@@ -1949,6 +1964,26 @@ function normalizeWordHistory(source, length = 0) {
     correct: safeStatCount(sourceArray[index]?.correct),
     missed: safeStatCount(sourceArray[index]?.missed),
   }));
+}
+
+function normalizeLastComparison(source) {
+  if (!source || typeof source !== "object") return null;
+  const start = source.activeRange ? safeStatCount(source.activeRange.start) : null;
+  const end = source.activeRange ? safeStatCount(source.activeRange.end) : null;
+  const activeRange = start !== null && end !== null ? { start, end } : null;
+  if (!activeRange || activeRange.end <= activeRange.start) return null;
+  return {
+    activeRange,
+    correctExpectedIndexes: normalizeIndexArray([...indexCollectionToArray(source.correctExpectedIndexes ?? source.correctIndexes)]),
+    missedExpectedIndexes: normalizeIndexArray([...indexCollectionToArray(source.missedExpectedIndexes ?? source.missedIndexes)]),
+    accuracy: nullableCount(source.accuracy),
+    createdAt: String(source.createdAt || new Date().toISOString()),
+  };
+}
+
+function indexCollectionToArray(collection) {
+  if (collection instanceof Set) return [...collection];
+  return Array.isArray(collection) ? collection : [];
 }
 
 function isArticleKey(value) {
@@ -1982,6 +2017,7 @@ function applyStoredArticleProgress() {
   const progress = state.articleProgress[state.articleKey] || {};
   state.reciteCounts = normalizeCountArray(progress.reciteCounts, state.sentences.length);
   state.wordHistory = normalizeWordHistory(progress.wordHistory, expectedWordCount());
+  state.lastComparison = normalizeLastComparison(progress.lastComparison);
 }
 
 function saveArticleProgress() {
@@ -1989,6 +2025,7 @@ function saveArticleProgress() {
   state.articleProgress[state.articleKey] = {
     reciteCounts: normalizeCountArray(state.reciteCounts, state.sentences.length),
     wordHistory: normalizeWordHistory(state.wordHistory, expectedWordCount()),
+    lastComparison: normalizeLastComparison(state.lastComparison),
     updatedAt: new Date().toISOString(),
   };
   localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
@@ -2758,7 +2795,27 @@ function progressFromArticleSessions(article, sessions) {
       wordHistory[index] = item;
     });
   });
-  return { reciteCounts, wordHistory, updatedAt: new Date().toISOString() };
+  const latestSession = sessions
+    .filter((session) => session.articleKey === article.articleKey && session.wordStart !== null && session.wordEnd !== null)
+    .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)))
+    .at(-1);
+  return {
+    reciteCounts,
+    wordHistory,
+    lastComparison: lastComparisonFromSession(latestSession),
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+function lastComparisonFromSession(session) {
+  if (!session || session.wordStart === null || session.wordEnd === null || session.wordEnd <= session.wordStart) return null;
+  return normalizeLastComparison({
+    activeRange: { start: session.wordStart, end: session.wordEnd },
+    correctExpectedIndexes: session.correctIndexes,
+    missedExpectedIndexes: session.missedIndexes,
+    accuracy: session.accuracy,
+    createdAt: session.createdAt,
+  });
 }
 
 async function deleteArticleEverywhere(articleKey) {
@@ -3122,13 +3179,12 @@ function currentHintWordIndex() {
 function expectedSurfaceWordRecords() {
   const records = [];
   let cursor = 0;
-  const regex = /[A-Za-z]+(?:'[A-Za-z]+)?/g;
 
   state.sentences.forEach((sentence) => {
     let match;
-    while ((match = regex.exec(sentence.english))) {
+    while ((match = WORD_OR_NUMBER_REGEX.exec(sentence.english))) {
       const text = match[0];
-      const expandedLength = expandContraction(text.toLowerCase()).length;
+      const expandedLength = scoredTokenWords(text).length;
       records.push({ text, start: cursor, end: cursor + expandedLength });
       cursor += expandedLength;
     }
@@ -3138,8 +3194,16 @@ function expectedSurfaceWordRecords() {
 }
 
 function wordsFromText(text) {
-  return (text.toLowerCase().match(/[a-z]+(?:'[a-z]+)?/g) || [])
-    .flatMap((word) => expandContraction(word));
+  return (text.match(WORD_OR_NUMBER_REGEX) || []).flatMap(scoredTokenWords);
+}
+
+function isScoredToken(token) {
+  return /^[A-Za-z0-9]/.test(token);
+}
+
+function scoredTokenWords(token) {
+  if (/^\d/.test(token)) return numberTokenToWords(token).map(canonicalMatchWord);
+  return expandContraction(token.toLowerCase()).map(canonicalMatchWord);
 }
 
 function expandContraction(word) {
@@ -3151,6 +3215,75 @@ function expandContraction(word) {
     .replace(/'ll$/, " will")
     .replace(/'d$/, " would")
     .split(" ");
+}
+
+function canonicalMatchWord(word) {
+  if (word === "zero" || word === "o") return "oh";
+  return word;
+}
+
+function numberTokenToWords(token) {
+  const normalized = token.replace(/,/g, "");
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return [normalized];
+  if (normalized.includes(".")) {
+    const [integerPart, decimalPart] = normalized.split(".");
+    return [
+      ...integerToWords(Number(integerPart)),
+      "point",
+      ...decimalPart.split("").flatMap((digit) => integerToWords(Number(digit))),
+    ];
+  }
+
+  const value = Number(normalized);
+  if (!Number.isSafeInteger(value)) return normalized.split("").flatMap((digit) => integerToWords(Number(digit)));
+  if (normalized.length === 4 && value >= 1000 && value <= 2099) return yearToWords(value);
+  return integerToWords(value);
+}
+
+function yearToWords(year) {
+  if (year === 2000) return ["two", "thousand"];
+  if (year >= 2000 && year <= 2009) return ["two", "thousand", ...integerToWords(year % 100)];
+  if (year >= 2010 && year <= 2099) return ["twenty", ...integerToWords(year % 100)];
+
+  const century = Math.floor(year / 100);
+  const rest = year % 100;
+  if (!rest) return [...integerToWords(century), "hundred"];
+  if (rest < 10) return [...integerToWords(century), "oh", ...integerToWords(rest)];
+  return [...integerToWords(century), ...integerToWords(rest)];
+}
+
+function integerToWords(number) {
+  const small = [
+    "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
+    "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen", "sixteen",
+    "seventeen", "eighteen", "nineteen",
+  ];
+  const tens = ["", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety"];
+  if (number < 20) return [small[number]];
+  if (number < 100) {
+    const ten = Math.floor(number / 10);
+    const rest = number % 10;
+    return rest ? [tens[ten], small[rest]] : [tens[ten]];
+  }
+  if (number < 1000) {
+    const hundred = Math.floor(number / 100);
+    const rest = number % 100;
+    return rest ? [small[hundred], "hundred", ...integerToWords(rest)] : [small[hundred], "hundred"];
+  }
+
+  const scales = [
+    [1_000_000_000, "billion"],
+    [1_000_000, "million"],
+    [1_000, "thousand"],
+  ];
+  for (const [scale, label] of scales) {
+    if (number >= scale) {
+      const head = Math.floor(number / scale);
+      const rest = number % scale;
+      return rest ? [...integerToWords(head), label, ...integerToWords(rest)] : [...integerToWords(head), label];
+    }
+  }
+  return String(number).split("").flatMap((digit) => integerToWords(Number(digit)));
 }
 
 function getSupportedMimeType() {
@@ -3311,6 +3444,7 @@ function resetAll() {
   state.articleKey = "";
   state.currentArticleMeta = null;
   state.comparison = null;
+  state.lastComparison = null;
   state.finalTranscript = "";
   state.interimTranscript = "";
   state.lastRecognizedRange = null;
