@@ -7,6 +7,7 @@ const state = {
   mediaRecorder: null,
   recordedChunks: [],
   recordingMimeType: "",
+  recordingStopTimer: null,
   recognition: null,
   recognitionWatchdog: null,
   recognitionRestarting: false,
@@ -1095,6 +1096,10 @@ function startRecitation() {
   }
 
   state.recordedChunks = [];
+  if (state.recordingStopTimer) {
+    window.clearTimeout(state.recordingStopTimer);
+    state.recordingStopTimer = null;
+  }
   state.finalTranscript = "";
   state.interimTranscript = "";
   state.comparison = null;
@@ -1154,18 +1159,38 @@ function stopRecitation() {
   state.isRecording = false;
   clearLiveCompareTimer();
   stopRecognitionWatchdog();
-  if (state.mediaRecorder?.state === "recording") {
+
+  const recorder = state.mediaRecorder;
+  let waitingForRecorder = false;
+  if (recorder?.state === "recording") {
+    waitingForRecorder = true;
     try {
-      state.mediaRecorder.requestData();
+      recorder.requestData();
     } catch {
       // Safari may not support requestData in every recording state.
     }
-    state.mediaRecorder.stop();
+    try {
+      recorder.stop();
+    } catch {
+      waitingForRecorder = false;
+      state.mediaRecorder = null;
+    }
   }
   stopSpeechRecognition();
-  stopMediaStream();
+  if (waitingForRecorder) {
+    if (state.recordingStopTimer) window.clearTimeout(state.recordingStopTimer);
+    state.recordingStopTimer = window.setTimeout(() => {
+      if (state.mediaRecorder === recorder) {
+        state.mediaRecorder = null;
+        stopMediaStream();
+        setRecordStatus("录像保存超时，可能没有生成有效视频。请缩短本次录制或重试。");
+      }
+    }, 30000);
+  } else {
+    stopMediaStream();
+  }
   syncFloatingControls();
-  setRecordStatus("正在整理最后的语音识别结果...");
+  setRecordStatus(waitingForRecorder ? "正在保存录像和整理评分..." : "正在整理最后的语音识别结果...");
   window.setTimeout(() => compareTranscript(), 600);
 }
 
@@ -1227,30 +1252,38 @@ async function finishRecording() {
   const blobType = state.mediaRecorder?.mimeType || state.recordingMimeType || getRecordingFallbackMimeType();
   const blob = new Blob(state.recordedChunks, { type: blobType });
   state.mediaRecorder = null;
-
-  if (!blob.size) {
-    clearReplayRecording();
-    setRecordStatus("本次录像没有生成有效视频，请重新录制。");
-    return;
+  if (state.recordingStopTimer) {
+    window.clearTimeout(state.recordingStopTimer);
+    state.recordingStopTimer = null;
   }
 
-  const url = URL.createObjectURL(blob);
-  state.recordingUrl = url;
-  state.recordingMimeType = blob.type || blobType;
-  els.downloadLink.href = url;
-  els.downloadLink.download = `recitation-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${recordingFileExtension(blob.type || blobType)}`;
-  els.downloadLink.hidden = false;
-  els.downloadLink.textContent = "下载录像";
-
   try {
-    await loadReplayVideo(url);
+    if (!blob.size) {
+      clearReplayRecording();
+      setRecordStatus("本次录像没有生成有效视频，请重新录制。");
+      return;
+    }
+
+    const url = URL.createObjectURL(blob);
+    state.recordingUrl = url;
+    state.recordingMimeType = blob.type || blobType;
+    els.downloadLink.href = url;
+    els.downloadLink.download = `recitation-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${recordingFileExtension(blob.type || blobType)}`;
+    els.downloadLink.hidden = false;
+    els.downloadLink.textContent = "下载录像";
+
+    try {
+      await loadReplayVideo(url);
+      setRecordStatus("录像已保存，可回看。");
+    } catch {
+      setRecordStatus("录像已保存，但预览加载较慢。可以点“系统播放”或“下载录像”查看。");
+    }
     resetReplayAudioState();
     primeReplayAudioForSafari();
     els.replayDock.hidden = false;
     updateReplayHighlight();
-  } catch {
-    clearReplayRecording();
-    setRecordStatus("本次录像生成失败，请重新录制。");
+  } finally {
+    stopMediaStream();
   }
 }
 
@@ -3237,7 +3270,7 @@ function loadReplayVideo(url) {
     };
     const handleReady = () => finish(resolve);
     const handleError = () => finish(reject);
-    const timer = window.setTimeout(handleError, 6000);
+    const timer = window.setTimeout(handleError, 20000);
 
     els.replayVideo.pause();
     els.replayVideo.removeAttribute("src");
