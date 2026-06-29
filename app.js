@@ -1665,8 +1665,10 @@ function showFloatingResult(sentenceRange, totalSentences) {
 }
 
 function updateReplayHighlight() {
-  const sentenceRange = state.comparison?.activeRange ? activeSentenceRange(state.comparison.activeRange) : null;
-  if (!sentenceRange || !state.recordingUrl) {
+  const comparison = displayComparison();
+  const sentenceRange = comparison?.activeRange ? activeSentenceRange(comparison.activeRange) : null;
+  const hasReplayVideo = Boolean(state.recordingUrl || els.replayVideo.currentSrc || els.replayVideo.src);
+  if (!sentenceRange || !hasReplayVideo) {
     clearReplayHighlight();
     return;
   }
@@ -1947,6 +1949,7 @@ function normalizeArticleProgress(source) {
       reciteCounts: normalizeCountArray(value.reciteCounts),
       wordHistory: normalizeWordHistory(value.wordHistory),
       lastComparison: normalizeLastComparison(value.lastComparison),
+      replayCues: normalizeReplayCues(value.replayCues),
       updatedAt: typeof value.updatedAt === "string" ? value.updatedAt : "",
     }]));
 }
@@ -1986,6 +1989,18 @@ function indexCollectionToArray(collection) {
   return Array.isArray(collection) ? collection : [];
 }
 
+function normalizeReplayCues(source) {
+  if (!Array.isArray(source)) return [];
+  return source
+    .map((cue) => ({
+      time: Number(cue?.time),
+      sentence: safeStatCount(cue?.sentence),
+    }))
+    .filter((cue) => Number.isFinite(cue.time) && cue.time >= 0 && cue.sentence > 0)
+    .sort((left, right) => left.time - right.time)
+    .slice(-MAX_REPLAY_CUES);
+}
+
 function isArticleKey(value) {
   return typeof value === "string" && /^article-[a-z0-9]{6,16}$/.test(value);
 }
@@ -2018,6 +2033,7 @@ function applyStoredArticleProgress() {
   state.reciteCounts = normalizeCountArray(progress.reciteCounts, state.sentences.length);
   state.wordHistory = normalizeWordHistory(progress.wordHistory, expectedWordCount());
   state.lastComparison = normalizeLastComparison(progress.lastComparison);
+  state.replayCues = normalizeReplayCues(progress.replayCues);
 }
 
 function saveArticleProgress() {
@@ -2026,6 +2042,7 @@ function saveArticleProgress() {
     reciteCounts: normalizeCountArray(state.reciteCounts, state.sentences.length),
     wordHistory: normalizeWordHistory(state.wordHistory, expectedWordCount()),
     lastComparison: normalizeLastComparison(state.lastComparison),
+    replayCues: normalizeReplayCues(state.replayCues),
     updatedAt: new Date().toISOString(),
   };
   localStorage.setItem(ARTICLE_PROGRESS_KEY, JSON.stringify(state.articleProgress));
@@ -2803,6 +2820,7 @@ function progressFromArticleSessions(article, sessions) {
     reciteCounts,
     wordHistory,
     lastComparison: lastComparisonFromSession(latestSession),
+    replayCues: [],
     updatedAt: new Date().toISOString(),
   };
 }
