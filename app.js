@@ -1142,11 +1142,15 @@ function startRecitation() {
   try {
     state.mediaRecorder = new MediaRecorder(state.mediaStream, mimeType ? { mimeType } : undefined);
   } catch (error) {
-    state.isRecording = false;
-    state.mediaRecorder = null;
-    setRecordStatus(`当前浏览器无法创建录像：${error.name || "未知错误"}。请换 Safari/Chrome 或重启浏览器后重试。`);
-    syncFloatingControls();
-    return;
+    try {
+      state.mediaRecorder = new MediaRecorder(state.mediaStream);
+    } catch (fallbackError) {
+      state.isRecording = false;
+      state.mediaRecorder = null;
+      setRecordStatus(`当前浏览器无法创建录像：${fallbackError.name || error.name || "未知错误"}。请换 Safari/Chrome 或重启浏览器后重试。`);
+      syncFloatingControls();
+      return;
+    }
   }
 
   state.recordingMimeType = state.mediaRecorder.mimeType || mimeType || "";
@@ -1177,10 +1181,12 @@ function stopRecitation() {
   let waitingForRecorder = false;
   if (recorder?.state === "recording") {
     waitingForRecorder = true;
-    try {
-      recorder.requestData();
-    } catch {
-      // Safari may not support requestData in every recording state.
+    if (!isAppleMobileSafari()) {
+      try {
+        recorder.requestData();
+      } catch {
+        // Some browsers may not support requestData in every recording state.
+      }
     }
     try {
       recorder.stop();
@@ -1273,7 +1279,7 @@ async function finishRecording() {
   try {
     if (!blob.size) {
       clearReplayRecording();
-      setRecordStatus("本次录像没有生成有效视频，请重新录制。");
+      setRecordStatus(`本次录像没有生成有效视频。格式：${blobType || "默认格式"}，视频块：${state.recordedChunks.length}。请重开摄像头后再试一次。`);
       return;
     }
 
@@ -1284,12 +1290,13 @@ async function finishRecording() {
     els.downloadLink.download = `recitation-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.${recordingFileExtension(blob.type || blobType)}`;
     els.downloadLink.hidden = false;
     els.downloadLink.textContent = "下载录像";
+    const recordingInfo = `${formatBytes(blob.size)}，${state.recordingMimeType || "默认格式"}`;
 
     try {
       await loadReplayVideo(url);
-      setRecordStatus("录像已保存，可回看。");
+      setRecordStatus(`录像已保存，可回看。（${recordingInfo}）`);
     } catch {
-      setRecordStatus("录像已保存，但预览加载较慢。可以点“系统播放”或“下载录像”查看。");
+      setRecordStatus(`录像已生成但网页预览失败。（${recordingInfo}）请点“系统播放”或“下载录像”查看；如果也打不开，请告诉我这行大小和格式。`);
     }
     resetReplayAudioState();
     primeReplayAudioForSafari();
@@ -3308,9 +3315,9 @@ function getSupportedMimeType() {
   if (!window.MediaRecorder?.isTypeSupported) return "";
 
   const safariTypes = [
-    "video/mp4;codecs=h264,aac",
-    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
     "video/mp4",
+    "video/mp4;codecs=avc1.42E01E,mp4a.40.2",
+    "video/mp4;codecs=h264,aac",
   ];
   const webTypes = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
   const types = isAppleMobileSafari() ? [...safariTypes, ...webTypes] : [...webTypes, ...safariTypes];
@@ -3323,6 +3330,12 @@ function getRecordingFallbackMimeType() {
 
 function recordingFileExtension(mimeType) {
   return /mp4/i.test(mimeType || "") ? "mp4" : "webm";
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function resetReplayAudioState() {
